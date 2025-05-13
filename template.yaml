@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  mvr-sam-app
+
+  Sample SAM Template for mvr-sam-app
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+
+    # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
+    LoggingConfig:
+      LogFormat: JSON
+Resources:
+
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: hello-world/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+        SubnetIds:
+          - subnet-0bbaa5d7391f2f774        
+          - subnet-0efb623070a90811d
+      Environment:
+        Variables:
+          DB_HOST: mvr-database.cluster-ca9y0u4asfig.us-east-1.rds.amazonaws.com
+          DB_PORT: 5432
+          DB_NAME: mvr_postgresql_db
+          DB_USER: postgres
+          DB_PASSWORD: SanReyJam1234!
+      Events:
+        HelloWorld:
+          Type: Api
+          Properties:
+            Path: /hello
+            Method: get
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
+
+  AddMVRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: add-mvr/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+        SubnetIds:
+          - subnet-0bbaa5d7391f2f774        
+          - subnet-0efb623070a90811d
+      Environment:
+        Variables:
+          DB_HOST: mvr-database.cluster-ca9y0u4asfig.us-east-1.rds.amazonaws.com
+          DB_PORT: 5432
+          DB_NAME: mvr_postgresql_db
+          DB_USER: postgres
+          DB_PASSWORD: SanReyJam1234!
+      Events:
+        AddMVR:
+          Type: Api
+          Properties:
+            Path: /add-mvr
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
+
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  HelloWorldFunctionIamRole:
+    Description: Implicit IAM Role created for Hello World function
+    Value: !GetAtt HelloWorldFunctionRole.Arn
+  HelloWorldApi:
+    Description: API Gateway endpoint URL for Prod stage for Hello World function
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+  HelloWorldFunction:
+    Description: Hello World Lambda Function ARN
+    Value: !GetAtt HelloWorldFunction.Arn
+  AddMVRFunction:
+    Description: Function to add an MVR
+    Value: !GetAtt HelloWorldFunction.Arn
+  AddMVRApi:
+    Description: API Gateway endpoint URL for Prod stage for adding MVR function
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
+
