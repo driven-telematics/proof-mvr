@@ -87,6 +87,77 @@ Resources:
         EntryPoints:
           - app.ts
 
+  BatchAddMVRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: batch-add-mvr/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+        SubnetIds:
+          - subnet-0bbaa5d7391f2f774        
+          - subnet-0efb623070a90811d
+      Environment:
+        Variables:
+          DB_HOST: mvr-database.cluster-ca9y0u4asfig.us-east-1.rds.amazonaws.com
+          DB_PORT: 5432
+          DB_NAME: mvr_postgresql_db
+          DB_USER: postgres
+          DB_PASSWORD: SanReyJam1234!
+      Events:
+        BatchAddMVR:
+          Type: Api
+          Properties:
+            Path: /batch-add-mvr
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
+
+  GetMVRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: get-mvr/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+        SubnetIds:
+          - subnet-0bbaa5d7391f2f774        
+          - subnet-0efb623070a90811d
+      Environment:
+        Variables:
+          DB_HOST: mvr-database.cluster-ca9y0u4asfig.us-east-1.rds.amazonaws.com
+          DB_PORT: 5432
+          DB_NAME: mvr_postgresql_db
+          DB_USER: postgres
+          DB_PASSWORD: SanReyJam1234!
+      Events:
+        GetMVR:
+          Type: Api
+          Properties:
+            Path: /get-mvr
+            Method: get
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
@@ -103,6 +174,7 @@ Resources:
         Ref: ApplicationResourceGroup
       AutoConfigurationEnabled: 'true'
 
+
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
@@ -116,10 +188,25 @@ Outputs:
   HelloWorldFunction:
     Description: Hello World Lambda Function ARN
     Value: !GetAtt HelloWorldFunction.Arn
+  
   AddMVRFunction:
     Description: Function to add an MVR
     Value: !GetAtt HelloWorldFunction.Arn
   AddMVRApi:
     Description: API Gateway endpoint URL for Prod stage for adding MVR function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
+  
+  BatchAddMVRFunction:
+    Description: Function to add a batch of MVR's
+    Value: !GetAtt HelloWorldFunction.Arn
+  BatchAddMVRApi:
+    Description: API Gateway endpoint URL for Prod stage for adding MVR function
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/batch-add-mvr/"
+  
+  GetMVRFunction:
+    Description: Function to get an MVR
+    Value: !GetAtt HelloWorldFunction.Arn
+  GetMVRApi:
+    Description: API Gateway endpoint URL for Prod stage for getting an MVR function
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/get-mvr/"
 

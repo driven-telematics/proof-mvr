@@ -3,8 +3,6 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { Pool } from 'pg';
 import { format, subDays } from 'date-fns';
 
-// TODO: 
-// Delete the MVR record and the corresponding data when a new one is put in place to replace it
 
 
 const pool = new Pool({
@@ -88,6 +86,14 @@ interface MVRData {
     seller_id?: number;
     buyer_id?: number;
   };
+}
+
+interface BatchProcessResult {
+  success: boolean;
+  message: string;
+  mvr_id?: number;
+  error?: string;
+  drivers_license_number: string;
 }
 
 async function checkExistingUser(client: any, driversLicense: string): Promise<{ userId: number | null, currentMvrId: number | null, hasRecentMvr: boolean }> {
@@ -348,52 +354,34 @@ async function addTransaction(client: any, transaction: any, mvrId: number, stat
   await client.query(query, params);
 }
 
-export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  let mvrData: MVRData;
-  
+async function processSingleMvr(client: any, mvrData: MVRData): Promise<BatchProcessResult> {
   try {
-    if (!event.body) {
-      throw new Error('Missing request body');
-    }
-    mvrData = JSON.parse(event.body) as MVRData;
-    
     if (!mvrData.drivers_license_number) {
-      throw new Error('Required fields missing');
+      return {
+        success: false,
+        message: 'Required fields missing',
+        error: 'Driver\'s license number is required',
+        drivers_license_number: 'unknown'
+      };
     }
-  } catch (error: any) {
-    console.error('Input validation error:', error);
-    return {
-      statusCode: 400,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: error.message || 'Invalid request data' })
-    };
-  }
-  
-  const client = await pool.connect();
-  
-  try {
-    await client.query('BEGIN');
-    
+
     const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
 
     if (userId && hasRecentMvr) {
-      await client.query('COMMIT');
       return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
+        success: true,
+        message: 'MVR uploaded less than 30 days ago',
+        drivers_license_number: mvrData.drivers_license_number
       };
     }
 
     const mvrId = await createMvrRecord(client, mvrData);
-    
 
     if (userId) {
       await updateUserMvrId(client, userId, mvrId);
     } else {
       await createUser(client, mvrData, mvrId);
     }
-    
 
     await addDriverLicenseInfo(client, mvrData, mvrId);
     await addTrafficViolations(client, mvrData.violations || [], mvrId);
@@ -401,27 +389,91 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     await addAccidents(client, mvrData.accidents || [], mvrId);
     await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
     await addTransaction(client, mvrData.transaction, mvrId, mvrData.state_code);
+
+    return {
+      success: true,
+      message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
+      mvr_id: mvrId,
+      drivers_license_number: mvrData.drivers_license_number
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      message: 'Error processing MVR',
+      error: error.message || 'Unknown error',
+      drivers_license_number: mvrData.drivers_license_number || 'unknown'
+    };
+  }
+}
+
+export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+  const client = await pool.connect();
+  const results: BatchProcessResult[] = [];
+  
+  try {
+    if (!event.body) {
+      throw new Error('Missing request body');
+    }
+    
+    const requestData = JSON.parse(event.body);
+    let mvrDataArray: MVRData[] = [];
+    
+    if (Array.isArray(requestData)) {
+      mvrDataArray = requestData;
+    } else {
+      mvrDataArray = [requestData];
+    }
+    
+    if (mvrDataArray.length === 0) {
+      throw new Error('No MVR records provided');
+    }
+    
+    await client.query('BEGIN');
+    
+    for (const mvrData of mvrDataArray) {
+      const result = await processSingleMvr(client, mvrData);
+      results.push(result);
+    }
+    
+    if (results.some(result => !result.success)) {
+      throw new Error('One or more MVR records failed to process');
+    }
     
     await client.query('COMMIT');
     
+    const totalRecords = results.length;
+    const successCount = results.filter(r => r.success).length;
+    const newRecords = results.filter(r => r.success && r.message.includes('New user')).length;
+    const updatedRecords = results.filter(r => r.success && r.message.includes('updated')).length;
+    const skippedRecords = results.filter(r => r.success && r.message.includes('less than 30 days')).length;
+    
     return {
-      statusCode: 201,
+      statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
-        mvr_id: mvrId
+      body: JSON.stringify({
+        message: `Processed ${successCount}/${totalRecords} MVR records successfully`,
+        summary: {
+          total: totalRecords,
+          successful: successCount,
+          new_records: newRecords,
+          updated_records: updatedRecords,
+          skipped_records: skippedRecords
+        },
+        results: results
       })
     };
     
   } catch (error: any) {
-
     await client.query('ROLLBACK');
-    console.error('Error processing MVR:', error);
+    console.error('Error processing MVR batch:', error);
     
     return {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: error.message || 'Internal server error' })
+      body: JSON.stringify({ 
+        error: error.message || 'Internal server error',
+        results: results
+      })
     };
     
   } finally {
