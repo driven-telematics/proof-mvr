@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { Pool } from 'pg';
+import { FirehoseClient, PutRecordCommand } from "@aws-sdk/client-firehose";
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -8,27 +9,45 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT || '5432'),
-  ssl: {
-    rejectUnauthorized: false 
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
+const firehose = new FirehoseClient({ region: process.env.AWS_REGION || 'us-east-1' });
+
+async function logToFirehose(data: any) {
+  const deliveryStreamName = process.env.AUDIT_FIREHOSE_NAME;
+  if (!deliveryStreamName) {
+    console.log("AUDIT_FIREHOSE_NAME is not set; skipping Firehose logging.");
+    return;
+  }
+
+  const record = {
+    event: "GetMVR",
+    timestamp: new Date().toISOString(),
+    drivers_license_number: data.drivers_license_number,
+    issued_state_code: data.issued_state_code,
+    full_legal_name: data.full_legal_name,
+    success: true
+  };
+
+  try {
+    await firehose.send(new PutRecordCommand({
+      DeliveryStreamName: deliveryStreamName,
+      Record: { Data: Buffer.from(JSON.stringify(record) + '\n') }
+    }));
+  } catch (err) {
+    console.error("Failed to log to Firehose:", err);
+  }
+}
 
 export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  let drivers_license_number;
-  
+  let drivers_license_number: string;
+
   try {
-    if (!event.body) {
-      throw new Error('Missing request body');
-    }
-
+    if (!event.body) throw new Error('Missing request body');
     const body = JSON.parse(event.body);
-
-    drivers_license_number = body.drivers_license_number
-
-    if (!drivers_license_number) {
-      throw new Error('Missing Drivers License');
-    }
+    drivers_license_number = body.drivers_license_number;
+    if (!drivers_license_number) throw new Error('Missing Drivers License');
   } catch (error: any) {
     console.error('Input validation error:', error);
     return {
@@ -37,9 +56,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
       body: JSON.stringify({ error: error.message || 'Error Reading Drivers License' })
     };
   }
-  
+
   const client = await pool.connect();
-  
+
   try {
     const userQuery = `
       SELECT 
@@ -60,14 +79,11 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         phone_number,
         email,
         current_mvr_id
-      FROM 
-        users
-      WHERE 
-        drivers_license_number = $1
+      FROM users
+      WHERE drivers_license_number = $1
     `;
-    
     const userResult = await client.query(userQuery, [drivers_license_number]);
-    
+
     if (userResult.rows.length === 0) {
       return {
         statusCode: 404,
@@ -75,10 +91,10 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         body: JSON.stringify({ error: 'No user found with this driver\'s license number' })
       };
     }
-    
+
     const user = userResult.rows[0];
     const mvrId = user.current_mvr_id;
-    
+
     if (!mvrId) {
       return {
         statusCode: 404,
@@ -86,7 +102,7 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         body: JSON.stringify({ error: 'User found but no MVR ID associated' })
       };
     }
-    
+
     const mvrQuery = `
       SELECT 
         id,
@@ -102,14 +118,11 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         time_frame,
         is_certified,
         total_points
-      FROM 
-        mvr_records
-      WHERE 
-        id = $1
+      FROM mvr_records
+      WHERE id = $1
     `;
-    
     const mvrResult = await client.query(mvrQuery, [mvrId]);
-    
+
     if (mvrResult.rows.length === 0) {
       return {
         statusCode: 404,
@@ -117,9 +130,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         body: JSON.stringify({ error: 'MVR record not found' })
       };
     }
-    
+
     const mvr = mvrResult.rows[0];
-    
+
     const licenseQuery = `
       SELECT 
         license_class,
@@ -127,15 +140,12 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         expiration_date,
         status,
         restrictions
-      FROM 
-        drivers_license_info
-      WHERE 
-        mvr_id = $1
+      FROM drivers_license_info
+      WHERE mvr_id = $1
     `;
-    
     const licenseResult = await client.query(licenseQuery, [mvrId]);
     const licenseInfo = licenseResult.rows[0] || null;
-    
+
     const violationsQuery = `
       SELECT 
         violation_date,
@@ -144,82 +154,63 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         points_assessed,
         violation_code,
         description
-      FROM 
-        traffic_violations
-      WHERE 
-        mvr_id = $1
-      ORDER BY 
-        violation_date DESC
+      FROM traffic_violations
+      WHERE mvr_id = $1
+      ORDER BY violation_date DESC
     `;
-    
     const violationsResult = await client.query(violationsQuery, [mvrId]);
     const violations = violationsResult.rows;
-    
+
     const withdrawalsQuery = `
       SELECT 
         effective_date,
         eligibility_date,
         action_type,
         reason
-      FROM 
-        withdrawals
-      WHERE 
-        mvr_id = $1
-      ORDER BY 
-        effective_date DESC
+      FROM withdrawals
+      WHERE mvr_id = $1
+      ORDER BY effective_date DESC
     `;
-    
     const withdrawalsResult = await client.query(withdrawalsQuery, [mvrId]);
     const withdrawals = withdrawalsResult.rows;
-    
+
     const accidentsQuery = `
       SELECT 
         accident_date,
         location,
         acd_code,
         description
-      FROM 
-        accident_reports
-      WHERE 
-        mvr_id = $1
-      ORDER BY 
-        accident_date DESC
+      FROM accident_reports
+      WHERE mvr_id = $1
+      ORDER BY accident_date DESC
     `;
-    
     const accidentsResult = await client.query(accidentsQuery, [mvrId]);
     const accidents = accidentsResult.rows;
-    
+
     const crimesQuery = `
       SELECT 
         crime_date,
         conviction_date,
         offense_code,
         description
-      FROM 
-        traffic_crimes
-      WHERE 
-        mvr_id = $1
-      ORDER BY 
-        crime_date DESC
+      FROM traffic_crimes
+      WHERE mvr_id = $1
+      ORDER BY crime_date DESC
     `;
-    
     const crimesResult = await client.query(crimesQuery, [mvrId]);
     const crimes = crimesResult.rows;
-    
+
     const transactionQuery = `
       SELECT 
         seller_id,
         buyer_id,
         state_code
-      FROM 
-        transactions
-      WHERE 
-        mvr_id = $1
+      FROM transactions
+      WHERE mvr_id = $1
     `;
-    
     const transactionResult = await client.query(transactionQuery, [mvrId]);
     const transaction = transactionResult.rows[0] || null;
-    
+
     const mvrRecord = {
       drivers_license_number: user.drivers_license_number,
       full_legal_name: user.full_legal_name,
@@ -247,29 +238,29 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
       is_certified: mvr.is_certified,
       total_points: mvr.total_points,
 
-      licenseInfo: licenseInfo,
-      violations: violations,
-      withdrawals: withdrawals,
-      accidents: accidents,
-      crimes: crimes,
-      transaction: transaction
+      licenseInfo,
+      violations,
+      withdrawals,
+      accidents,
+      crimes,
+      transaction
     };
-    
+
+    await logToFirehose(user);
+
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(mvrRecord)
     };
-    
+
   } catch (error: any) {
     console.error('Error retrieving MVR record:', error);
-    
     return {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ error: error.message || 'Internal server error' })
     };
-    
   } finally {
     client.release();
   }
