@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   mvr-sam-app with comprehensive logging and S3 streaming
@@ -10,28 +10,21 @@ Globals:
       LogFormat: JSON
     Environment:
       Variables:
-        DB_HOST: mvr-database.cluster-ca9y0u4asfig.us-east-1.rds.amazonaws.com
-        DB_PORT: 5432
-        DB_NAME: mvr_postgresql_db
-        DB_USER: postgres
-        DB_PASSWORD: SanReyJam1234!
         S3_AUDIT_BUCKET: mvr-audit-logs
         AUDIT_FIREHOSE_NAME: MVRAuditFirehose
 
-
 Resources:
- 
   MVRAuditLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/mvr-audit-group"
       RetentionInDays: 30
-      
+
   FirehoseDeliveryRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -40,7 +33,7 @@ Resources:
       Policies:
         - PolicyName: FirehoseDeliveryPolicy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
@@ -87,10 +80,10 @@ Resources:
         SecurityGroupIds:
           - sg-09b13c689ca54eb6e
         SubnetIds:
-          - subnet-0bbaa5d7391f2f774        
+          - subnet-0bbaa5d7391f2f774
           - subnet-0efb623070a90811d
       Policies:
-        - Version: '2012-10-17'
+        - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
@@ -129,10 +122,14 @@ Resources:
         SecurityGroupIds:
           - sg-09b13c689ca54eb6e
         SubnetIds:
-          - subnet-0bbaa5d7391f2f774        
+          - subnet-0bbaa5d7391f2f774
           - subnet-0efb623070a90811d
+      Environment:
+        Variables:
+          USER_AND_PASS_ARN: "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-postgresql-username-and-password-sULrF1"
+          OTHER_VARS_ARN: "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Policies:
-        - Version: '2012-10-17'
+        - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
@@ -144,6 +141,12 @@ Resources:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
               Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
+            - Effect: Allow
+              Action: 
+                -  secretsmanager:GetSecretValue
+              Resource: 
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-postgresql-username-and-password-sULrF1"
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         AddMVR:
           Type: Api
@@ -171,10 +174,10 @@ Resources:
         SecurityGroupIds:
           - sg-09b13c689ca54eb6e
         SubnetIds:
-          - subnet-0bbaa5d7391f2f774        
+          - subnet-0bbaa5d7391f2f774
           - subnet-0efb623070a90811d
       Policies:
-        - Version: '2012-10-17'
+        - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
@@ -213,10 +216,10 @@ Resources:
         SecurityGroupIds:
           - sg-09b13c689ca54eb6e
         SubnetIds:
-          - subnet-0bbaa5d7391f2f774        
+          - subnet-0bbaa5d7391f2f774
           - subnet-0efb623070a90811d
       Policies:
-        - Version: '2012-10-17'
+        - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
@@ -250,27 +253,27 @@ Resources:
         Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
       ResourceQuery:
         Type: CLOUDFORMATION_STACK_1_0
-  
+
   ApplicationInsightsMonitoring:
     Type: AWS::ApplicationInsights::Application
     Properties:
       ResourceGroupName:
         Ref: ApplicationResourceGroup
-      AutoConfigurationEnabled: 'true'
+      AutoConfigurationEnabled: "true"
 
 Outputs:
   HelloWorldApi:
     Description: API Gateway endpoint URL for Prod stage for Hello World function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
-  
+
   AddMVRApi:
     Description: API Gateway endpoint URL for Prod stage for adding MVR function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
-  
+
   BatchAddMVRApi:
     Description: API Gateway endpoint URL for Prod stage for batch adding MVR function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/batch-add-mvr/"
-  
+
   GetMVRApi:
     Description: API Gateway endpoint URL for Prod stage for getting an MVR function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/get-mvr/"

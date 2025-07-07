@@ -1,24 +1,43 @@
 /* eslint-disable prettier/prettier */
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { Pool } from 'pg';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { Pool, PoolClient } from 'pg';
 import { format, subDays } from 'date-fns';
 
 // TODO: 
 // Delete the MVR record and the corresponding data when a new one is put in place to replace it
 
+export interface MVRViolation {
+  violation_date: string;
+  conviction_date?: string;
+  location?: string;
+  points_assessed?: number;
+  violation_code?: string;
+  description?: string;
+}
 
-const pool = new Pool({
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  ssl: {
-    rejectUnauthorized: false 
-  }
-});
+export interface MVRWithdrawal {
+  effective_date: string;
+  eligibility_date?: string;
+  action_type?: string;
+  reason?: string;
+}
 
-interface MVRData {
+export interface MVRAccident {
+  accident_date: string;
+  location?: string;
+  acd_code?: string;
+  description?: string;
+}
+
+export interface MVRCrime {
+  crime_date: string;
+  conviction_date?: string;
+  offense_code?: string;
+  description?: string;
+}
+
+export interface MVRData {
   drivers_license_number: string;
   full_legal_name: string;
   birthdate: string;
@@ -54,43 +73,70 @@ interface MVRData {
   status?: string;
   restrictions?: string;
   
-  violations?: Array<{
-    violation_date: string;
-    conviction_date?: string;
-    location?: string;
-    points_assessed?: number;
-    violation_code?: string;
-    description?: string;
-  }>;
-  
-  withdrawals?: Array<{
-    effective_date: string;
-    eligibility_date?: string;
-    action_type?: string;
-    reason?: string;
-  }>;
-  
-  accidents?: Array<{
-    accident_date: string;
-    location?: string;
-    acd_code?: string;
-    description?: string;
-  }>;
-  
-  crimes?: Array<{
-    crime_date: string;
-    conviction_date?: string;
-    offense_code?: string;
-    description?: string;
-  }>;
-  
-  transaction?: {
-    seller_id?: number;
-    buyer_id?: number;
-  };
+  violations?: MVRViolation[];
+  withdrawals?: MVRWithdrawal[];
+  accidents?: MVRAccident[];
+  crimes?: MVRCrime[];
+}
+ 
+interface DatabaseConfigVariables {
+  username?: string;
+  password?: string;
+  MVR_DB_HOST?: string; 
+  MVR_DB_NAME?: string; 
+  MVR_DB_PORT?: string;
 }
 
-async function checkExistingUser(client: any, driversLicense: string): Promise<{ userId: number | null, currentMvrId: number | null, hasRecentMvr: boolean }> {
+export const getSecretValue = async (secretName: string): Promise<DatabaseConfigVariables> => {
+  if (!secretName) {
+    throw new Error("Secret name is required");
+  }
+
+  try {
+    const client = new SecretsManagerClient();
+    const response = await client.send(
+      new GetSecretValueCommand({
+        SecretId: secretName,
+      })
+    );
+
+    if (!response.SecretString) {
+      throw new Error("Secret string is empty or undefined");
+    }
+
+    const secret = JSON.parse(response.SecretString);
+  
+    return secret;
+  } catch (error) {
+    console.error(`Failed to retrieve secret ${secretName}:`, error);
+    throw error;
+  }
+};
+
+export const createDatabasePool = async (): Promise<Pool> => {
+  try {
+    const usernameAndPasswordSecret = await getSecretValue("mvr-postgresql-username-and-password");
+    const otherValuesSecret = await getSecretValue("mvr-global-environments")
+    const poolConfig = {
+      host: otherValuesSecret.MVR_DB_HOST,
+      database: otherValuesSecret.MVR_DB_NAME,
+      user: usernameAndPasswordSecret.username,
+      password: usernameAndPasswordSecret.password,
+      port: parseInt(otherValuesSecret.MVR_DB_PORT || '5432'),
+      ssl: {
+        rejectUnauthorized: false 
+      }
+    };
+    const dbPool = new Pool(poolConfig);
+    return dbPool;
+
+  } catch (error) {
+    console.error('Failed to create database pool:', error);
+    throw error;
+  }
+};
+
+async function checkExistingUser(client: PoolClient, driversLicense: string): Promise<{ userId: number | null, currentMvrId: number | null, hasRecentMvr: boolean }> {
   const userQuery = `
     SELECT id, current_mvr_id 
     FROM users 
@@ -124,7 +170,7 @@ async function checkExistingUser(client: any, driversLicense: string): Promise<{
   return { userId, currentMvrId, hasRecentMvr };
 }
 
-async function createMvrRecord(client: any, mvrData: MVRData): Promise<number> {
+async function createMvrRecord(client: PoolClient, mvrData: MVRData): Promise<number> {
   const query = `
     INSERT INTO mvr_records (
       claim_number, order_id, order_date, report_date, 
@@ -154,7 +200,7 @@ async function createMvrRecord(client: any, mvrData: MVRData): Promise<number> {
   return result.rows[0].id;
 }
 
-async function createUser(client: any, mvrData: MVRData, mvrId: number): Promise<number> {
+async function createUser(client: PoolClient, mvrData: MVRData, mvrId: number): Promise<number> {
   const query = `
     INSERT INTO users (
       drivers_license_number, full_legal_name, birthdate, 
@@ -189,7 +235,7 @@ async function createUser(client: any, mvrData: MVRData, mvrId: number): Promise
   return result.rows[0].id;
 }
 
-async function updateUserMvrId(client: any, userId: number, mvrId: number): Promise<void> {
+async function updateUserMvrId(client: PoolClient, userId: number, mvrId: number): Promise<void> {
   const query = `
     UPDATE users 
     SET current_mvr_id = $1 
@@ -199,7 +245,7 @@ async function updateUserMvrId(client: any, userId: number, mvrId: number): Prom
   await client.query(query, [mvrId, userId]);
 }
 
-async function addDriverLicenseInfo(client: any, mvrData: MVRData, mvrId: number): Promise<void> {
+async function addDriverLicenseInfo(client: PoolClient, mvrData: MVRData, mvrId: number): Promise<void> {
   if (!mvrData.license_class && !mvrData.issue_date && !mvrData.expiration_date) {
     return; 
   }
@@ -223,7 +269,7 @@ async function addDriverLicenseInfo(client: any, mvrData: MVRData, mvrId: number
   await client.query(query, params);
 }
 
-async function addTrafficViolations(client: any, violations: any[], mvrId: number): Promise<void> {
+async function addTrafficViolations(client: PoolClient, violations: MVRViolation[], mvrId: number): Promise<void> {
   if (!violations || violations.length === 0) {
     return;
   }
@@ -251,7 +297,7 @@ async function addTrafficViolations(client: any, violations: any[], mvrId: numbe
   }
 }
 
-async function addWithdrawals(client: any, withdrawals: any[], mvrId: number): Promise<void> {
+async function addWithdrawals(client: PoolClient, withdrawals: MVRWithdrawal[], mvrId: number): Promise<void> {
   if (!withdrawals || withdrawals.length === 0) {
     return;
   }
@@ -276,7 +322,7 @@ async function addWithdrawals(client: any, withdrawals: any[], mvrId: number): P
   }
 }
 
-async function addAccidents(client: any, accidents: any[], mvrId: number): Promise<void> {
+async function addAccidents(client: PoolClient, accidents: MVRAccident[], mvrId: number): Promise<void> {
   if (!accidents || accidents.length === 0) {
     return;
   }
@@ -301,7 +347,7 @@ async function addAccidents(client: any, accidents: any[], mvrId: number): Promi
   }
 }
 
-async function addTrafficCrimes(client: any, crimes: any[], mvrId: number): Promise<void> {
+async function addTrafficCrimes(client: PoolClient, crimes: MVRCrime[], mvrId: number): Promise<void> {
   if (!crimes || crimes.length === 0) {
     return;
   }
@@ -326,31 +372,8 @@ async function addTrafficCrimes(client: any, crimes: any[], mvrId: number): Prom
   }
 }
 
-async function addTransaction(client: any, transaction: any, mvrId: number, stateCode: string): Promise<void> {
-  if (!transaction) {
-    return;
-  }
-  
-  const query = `
-    INSERT INTO transactions (
-      mvr_id, seller_id, buyer_id, state_code
-    ) 
-    VALUES ($1, $2, $3, $4)
-  `;
-  
-  const params = [
-    mvrId,
-    transaction.seller_id || null,
-    transaction.buyer_id || null,
-    stateCode
-  ];
-  
-  await client.query(query, params);
-}
-
 export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   let mvrData: MVRData;
-  
   try {
     if (!event.body) {
       throw new Error('Missing request body');
@@ -369,62 +392,64 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     };
   }
   
-  const client = await pool.connect();
-  
   try {
-    await client.query('BEGIN');
+    const pool: Pool = await createDatabasePool();
+    const client: PoolClient = await pool.connect();
+    try {
+      await client.query('BEGIN');
     
-    const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
-
-    if (userId && hasRecentMvr) {
+      const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
+  
+      if (userId && hasRecentMvr) {
+        await client.query('COMMIT');
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
+        };
+      }
+  
+      const mvrId = await createMvrRecord(client, mvrData);
+      
+      if (userId) {
+        await updateUserMvrId(client, userId, mvrId);
+      } else {
+        await createUser(client, mvrData, mvrId);
+      }
+  
+      await addDriverLicenseInfo(client, mvrData, mvrId);
+      await addTrafficViolations(client, mvrData.violations || [], mvrId);
+      await addWithdrawals(client, mvrData.withdrawals || [], mvrId);
+      await addAccidents(client, mvrData.accidents || [], mvrId);
+      await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
+      
       await client.query('COMMIT');
+      
       return {
-        statusCode: 200,
+        statusCode: 201,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
+        body: JSON.stringify({ 
+          message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
+          mvr_id: mvrId
+        })
       };
+      
+    } catch (error: any) {
+  
+      await client.query('ROLLBACK');
+      console.error('Error processing MVR:', error);
+      
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: error.message || 'Internal server error' })
+      };
+      
+    } finally {
+      client.release();
     }
-
-    const mvrId = await createMvrRecord(client, mvrData);
-    
-
-    if (userId) {
-      await updateUserMvrId(client, userId, mvrId);
-    } else {
-      await createUser(client, mvrData, mvrId);
+  } catch (error) {
+      console.error('Lambda handler error:', error);
+      throw error;
     }
-    
-
-    await addDriverLicenseInfo(client, mvrData, mvrId);
-    await addTrafficViolations(client, mvrData.violations || [], mvrId);
-    await addWithdrawals(client, mvrData.withdrawals || [], mvrId);
-    await addAccidents(client, mvrData.accidents || [], mvrId);
-    await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
-    await addTransaction(client, mvrData.transaction, mvrId, mvrData.state_code);
-    
-    await client.query('COMMIT');
-    
-    return {
-      statusCode: 201,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
-        mvr_id: mvrId
-      })
-    };
-    
-  } catch (error: any) {
-
-    await client.query('ROLLBACK');
-    console.error('Error processing MVR:', error);
-    
-    return {
-      statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: error.message || 'Internal server error' })
-    };
-    
-  } finally {
-    client.release();
-  }
 };

@@ -7,20 +7,13 @@ interface ProcessedLogRecord {
   hour: string;
   operation: string;
   user_id?: string;
-  user_ip?: string;
   success: boolean;
   function_name: string;
   request_id: string;
   drivers_license_number?: string;
   affected_records_count?: number;
-  execution_time_ms?: number;
-  data_sensitivity: string;
   error_message?: string;
-  
   operation_category: 'READ' | 'WRITE' | 'DELETE';
-  risk_score: number;
-  compliance_flags: string[];
-  
   raw_log: string;
 }
 
@@ -67,9 +60,7 @@ function processLogEntry(logEntry: any): ProcessedLogRecord {
   
   const operationCategory = categorizeOperation(logEntry.operation);
   
-  const riskScore = calculateRiskScore(logEntry);
   
-  const complianceFlags = identifyComplianceFlags(logEntry);
   
   const processedRecord: ProcessedLogRecord = {
     timestamp,
@@ -77,23 +68,15 @@ function processLogEntry(logEntry: any): ProcessedLogRecord {
     hour,
     operation: logEntry.operation,
     user_id: logEntry.user_id,
-    user_ip: logEntry.user_ip,
     success: logEntry.success,
     function_name: logEntry.function_name,
     request_id: logEntry.request_id,
-    drivers_license_number: maskLicenseNumber(logEntry.drivers_license_number),
+    drivers_license_number: logEntry.drivers_license_number,
     affected_records_count: logEntry.affected_records_count || 0,
-    execution_time_ms: logEntry.execution_time_ms || 0,
-    data_sensitivity: logEntry.data_sensitivity,
     error_message: logEntry.error_message,
-    
     operation_category: operationCategory,
-    risk_score: riskScore,
-    compliance_flags: complianceFlags,
-    
     raw_log: JSON.stringify(logEntry)
   };
-  
   return processedRecord;
 }
 
@@ -117,25 +100,10 @@ function categorizeOperation(operation: string): 'READ' | 'WRITE' | 'DELETE' {
         return 'READ'; 
     }
   }
+
   
-  function calculateRiskScore(logEntry: any): number {
-    let score = 0;
-    if (!logEntry.success) score += 30;
-    if (logEntry.data_sensitivity === 'HIGH') score += 40;
-    if (logEntry.operation === 'DELETE') score += 20;
-    if (logEntry.drivers_license_number) score += 10;
-    return Math.min(score, 100);
-  }
   
-  function identifyComplianceFlags(logEntry: any): string[] {
-    const flags: string[] = [];
-    if (!logEntry.user_id) flags.push('NO_USER_ID');
-    if (logEntry.data_sensitivity === 'HIGH' && !logEntry.success) flags.push('FAILED_HIGH_SENSITIVITY');
-    if (logEntry.operation === 'DELETE' && !logEntry.success) flags.push('FAILED_DELETE');
-    return flags;
-  }
-  
-  function maskLicenseNumber(dlNumber?: string): string | undefined {
-    if (!dlNumber || dlNumber.length < 4) return undefined;
-    return '*'.repeat(dlNumber.length - 4) + dlNumber.slice(-4);
-  }
+//   function maskLicenseNumber(dlNumber?: string): string | undefined {
+//     if (!dlNumber || dlNumber.length < 4) return undefined;
+//     return '*'.repeat(dlNumber.length - 4) + dlNumber.slice(-4);
+//   }

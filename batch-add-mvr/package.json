@@ -1,7 +1,7 @@
 {
-  "name": "hello_world",
+  "name": "batch-add-mvr",
   "version": "1.0.0",
-  "description": "hello world sample for NodeJS",
+  "description": "Functionality for adding multiple MVR records at a single time.",
   "main": "app.js",
   "repository": "https://github.com/awslabs/aws-sam-cli/tree/develop/samcli/local/init/templates/cookiecutter-aws-sam-hello-nodejs",
   "author": "SAM CLI",
@@ -13,6 +13,7 @@
     "test": "npm run compile && npm run unit"
   },
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.840.0",
     "date-fns": "^4.1.0",
     "esbuild": "^0.14.14",
     "pg": "^8.16.0"
