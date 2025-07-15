@@ -1,0 +1,12 @@
+{
+  "invocationId": "test-id",
+  "deliveryStreamArn": "arn:aws:firehose:us-east-1:123456789012:deliverystream/MVRAuditFirehose",
+  "region": "us-east-1",
+  "records": [
+    {
+      "recordId": "1",
+      "approximateArrivalTimestamp": 1751915937958,
+      "data": "eyJ0aW1lc3RhbXAiOiIyMDI1LTA3LTE0VDE5OjAwOjAwWiIsIm9wZXJhdGlvbiI6IkdFVF9NVlIiLCJ1c2VyX2lkIjoiYWJjMTIzIiwiY29tcGFueV9pZCI6ImNvbXA0NTYiLCJkcml2ZXJzX2lkIjoiZHJ2Nzg5IiwiZHJpdmVyc19saWNlbnNlX251bWJlciI6IlhZWjEyMyIsImZ1bmN0aW9uX25hbWUiOiJnZXRNVlIiLCJyZXF1ZXN0X2lkIjoicmVxLTAwMSIsInN1Y2Nlc3MiOnRydWV9Cg=="
+    }
+  ]
+}

@@ -1,11 +1,16 @@
 /* eslint-disable prettier/prettier */
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
+import { GetSecretValueCommand, SecretsManagerClient, } from "@aws-sdk/client-secrets-manager";
 import { Pool, PoolClient } from "pg";
-import { FirehoseClient, PutRecordCommand } from "@aws-sdk/client-firehose";
+import {
+  FirehoseClient,
+  PutRecordCommand
+} from "@aws-sdk/client-firehose";
+
+const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
+const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
+let globalPool: Pool | null = null;
+
 
 interface User {
   id: string;
@@ -28,11 +33,12 @@ interface User {
 }
 
 interface DatabaseConfigVariables {
-  username?: string;
-  password?: string;
   MVR_DB_HOST?: string;
   MVR_DB_NAME?: string;
   MVR_DB_PORT?: string;
+  AWS_REGION?: string;
+  MVR_DB_USERNAME?: string;
+  MVR_DB_PASSWORD?: string;
 }
 
 export const getSecretValue = async (
@@ -55,7 +61,6 @@ export const getSecretValue = async (
     }
 
     const secret = JSON.parse(response.SecretString);
-
     return secret;
   } catch (error) {
     console.error(`Failed to retrieve secret ${secretName}:`, error);
@@ -64,299 +69,301 @@ export const getSecretValue = async (
 };
 
 export const createDatabasePool = async (): Promise<Pool> => {
+  if (globalPool) {
+    return globalPool;
+  }
+
   try {
-    const usernameAndPasswordSecret = await getSecretValue(
-      "mvr-postgresql-username-and-password",
-    );
-    const otherValuesSecret = await getSecretValue("mvr-global-environments");
+    const secrets = await getSecretValue("mvr-global-environments");
     const poolConfig = {
-      host: otherValuesSecret.MVR_DB_HOST,
-      database: otherValuesSecret.MVR_DB_NAME,
-      user: usernameAndPasswordSecret.username,
-      password: usernameAndPasswordSecret.password,
-      port: parseInt(otherValuesSecret.MVR_DB_PORT || "5432"),
+      host: secrets.MVR_DB_HOST,
+      database: secrets.MVR_DB_NAME,
+      user: secrets.MVR_DB_USERNAME ,
+      password: secrets.MVR_DB_PASSWORD,
+      port: parseInt(secrets.MVR_DB_PORT || "5432"),
       ssl: {
         rejectUnauthorized: false,
       },
+      max: 20, 
+      idleTimeoutMillis: 30000, 
+      connectionTimeoutMillis: 2000, 
+      statement_timeout: 5000,
+      query_timeout: 5000, 
     };
-    const dbPool = new Pool(poolConfig);
-    return dbPool;
+    
+    globalPool = new Pool(poolConfig);
+    return globalPool;
   } catch (error) {
     console.error("Failed to create database pool:", error);
     throw error;
   }
 };
 
-const firehose = new FirehoseClient({
-  region: process.env.AWS_REGION || "us-east-1",
-});
-
-async function logToFirehose(data: User) {
-  const deliveryStreamName = process.env.AUDIT_FIREHOSE_NAME;
-  if (!deliveryStreamName) {
-    console.log("AUDIT_FIREHOSE_NAME is not set; skipping Firehose logging.");
-    return;
-  }
-
-  const record = {
-    event: "GetMVR",
+async function sendAuditLog(userData: User, company_id: string): Promise<void> {
+  const payload = {
+    drivers_license_number: userData.drivers_license_number,
+    mvr_id: userData.current_mvr_id,
+    user_id: userData.id,
     timestamp: new Date().toISOString(),
-    drivers_license_number: data.drivers_license_number,
-    issued_state_code: data.issued_state_code,
-    full_legal_name: data.full_legal_name,
-    success: true,
+    operation: "GET_MVR",           
+    issued_state_code: userData.issued_state_code,
+    full_legal_name: userData.full_legal_name,
+    company_partition: company_id,
+    company_id: company_id,
   };
 
-  try {
-    await firehose.send(
-      new PutRecordCommand({
-        DeliveryStreamName: deliveryStreamName,
-        Record: { Data: Buffer.from(JSON.stringify(record) + "\n") },
-      }),
-    );
-  } catch (err) {
-    console.error("Failed to log to Firehose:", err);
-  }
+  await firehose.send(
+    new PutRecordCommand({
+      DeliveryStreamName: DELIVERY_STREAM,
+      Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
+    })
+  );
+
 }
 
 export const lambdaHandler = async (
   event: APIGatewayProxyEvent,
 ): Promise<APIGatewayProxyResult> => {
   let drivers_license_number: string;
+  let company_id: string;
 
   try {
     if (!event.body) throw new Error("Missing request body");
     const body = JSON.parse(event.body);
     drivers_license_number = body.drivers_license_number;
+    company_id = body.company_id;
     if (!drivers_license_number) throw new Error("Missing Drivers License");
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Input validation error:", error);
+    const err = ensureError(error);
     return {
       statusCode: 400,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        error: error.message || "Error Reading Drivers License",
+        error: err.message || "Error Reading Drivers License",
       }),
     };
   }
 
+  let client: PoolClient;
+  
   try {
     const pool: Pool = await createDatabasePool();
-    const client: PoolClient = await pool.connect();
-    try {
-      const userQuery = `
+    client = await pool.connect();
+    
+    const optimizedQuery = `
+      WITH user_data AS (
+        SELECT 
+          u.id,
+          u.drivers_license_number,
+          u.full_legal_name,
+          u.birthdate,
+          u.weight,
+          u.sex,
+          u.height,
+          u.hair_color,
+          u.eye_color,
+          u.medical_information,
+          u.address,
+          u.city,
+          u.issued_state_code,
+          u.zip,
+          u.phone_number,
+          u.email,
+          u.current_mvr_id
+        FROM users u
+        WHERE u.drivers_license_number = $1
+      )
       SELECT 
-        id,
-        drivers_license_number,
-        full_legal_name,
-        birthdate,
-        weight,
-        sex,
-        height,
-        hair_color,
-        eye_color,
-        medical_information,
-        address,
-        city,
-        issued_state_code,
-        zip,
-        phone_number,
-        email,
-        current_mvr_id
-      FROM users
-      WHERE drivers_license_number = $1
+        ud.*,
+        -- MVR Record data
+        mvr.claim_number,
+        mvr.order_id,
+        mvr.order_date,
+        mvr.report_date,
+        mvr.reference_number,
+        mvr.system_use,
+        mvr.mvr_type,
+        mvr.state_code,
+        mvr.purpose,
+        mvr.time_frame,
+        mvr.is_certified,
+        mvr.total_points,
+        -- License Info
+        dli.license_class,
+        dli.issue_date,
+        dli.expiration_date,
+        dli.status,
+        dli.restrictions,
+        -- Transaction Info
+        t.seller_id,
+        t.buyer_id,
+        t.state_code as transaction_state
+      FROM user_data ud
+      LEFT JOIN mvr_records mvr ON ud.current_mvr_id = mvr.id
+      LEFT JOIN drivers_license_info dli ON ud.current_mvr_id = dli.mvr_id
+      LEFT JOIN transactions t ON ud.current_mvr_id = t.mvr_id
     `;
-      const userResult = await client.query(userQuery, [
-        drivers_license_number,
-      ]);
 
-      if (userResult.rows.length === 0) {
-        return {
-          statusCode: 404,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            error: "No user found with this driver's license number",
-          }),
-        };
-      }
+    const [mainResult, violationsResult, withdrawalsResult, accidentsResult, crimesResult] = await Promise.all([
+      client.query(optimizedQuery, [drivers_license_number]),
+      
+      client.query(`
+        SELECT 
+          tv.violation_date,
+          tv.conviction_date,
+          tv.location,
+          tv.points_assessed,
+          tv.violation_code,
+          tv.description
+        FROM users u
+        JOIN traffic_violations tv ON u.current_mvr_id = tv.mvr_id
+        WHERE u.drivers_license_number = $1
+        ORDER BY tv.violation_date DESC
+      `, [drivers_license_number]),
 
-      const user = userResult.rows[0];
-      const mvrId = user.current_mvr_id;
+      client.query(`
+        SELECT 
+          w.effective_date,
+          w.eligibility_date,
+          w.action_type,
+          w.reason
+        FROM users u
+        JOIN withdrawals w ON u.current_mvr_id = w.mvr_id
+        WHERE u.drivers_license_number = $1
+        ORDER BY w.effective_date DESC
+      `, [drivers_license_number]),
 
-      if (!mvrId) {
-        return {
-          statusCode: 404,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            error: "User found but no MVR ID associated",
-          }),
-        };
-      }
+      client.query(`
+        SELECT 
+          ar.accident_date,
+          ar.location,
+          ar.acd_code,
+          ar.description
+        FROM users u
+        JOIN accident_reports ar ON u.current_mvr_id = ar.mvr_id
+        WHERE u.drivers_license_number = $1
+        ORDER BY ar.accident_date DESC
+      `, [drivers_license_number]),
 
-      const mvrQuery = `
-      SELECT 
-        id,
-        claim_number,
-        order_id,
-        order_date,
-        report_date,
-        reference_number,
-        system_use,
-        mvr_type,
-        state_code,
-        purpose,
-        time_frame,
-        is_certified,
-        total_points
-      FROM mvr_records
-      WHERE id = $1
-    `;
-      const mvrResult = await client.query(mvrQuery, [mvrId]);
+      client.query(`
+        SELECT 
+          tc.crime_date,
+          tc.conviction_date,
+          tc.offense_code,
+          tc.description
+        FROM users u
+        JOIN traffic_crimes tc ON u.current_mvr_id = tc.mvr_id
+        WHERE u.drivers_license_number = $1
+        ORDER BY tc.crime_date DESC
+      `, [drivers_license_number])
+    ]);
 
-      if (mvrResult.rows.length === 0) {
-        return {
-          statusCode: 404,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ error: "MVR record not found" }),
-        };
-      }
-
-      const mvr = mvrResult.rows[0];
-
-      const licenseQuery = `
-      SELECT 
-        license_class,
-        issue_date,
-        expiration_date,
-        status,
-        restrictions
-      FROM drivers_license_info
-      WHERE mvr_id = $1
-    `;
-      const licenseResult = await client.query(licenseQuery, [mvrId]);
-      const licenseInfo = licenseResult.rows[0] || null;
-
-      const violationsQuery = `
-      SELECT 
-        violation_date,
-        conviction_date,
-        location,
-        points_assessed,
-        violation_code,
-        description
-      FROM traffic_violations
-      WHERE mvr_id = $1
-      ORDER BY violation_date DESC
-    `;
-      const violationsResult = await client.query(violationsQuery, [mvrId]);
-      const violations = violationsResult.rows;
-
-      const withdrawalsQuery = `
-      SELECT 
-        effective_date,
-        eligibility_date,
-        action_type,
-        reason
-      FROM withdrawals
-      WHERE mvr_id = $1
-      ORDER BY effective_date DESC
-    `;
-      const withdrawalsResult = await client.query(withdrawalsQuery, [mvrId]);
-      const withdrawals = withdrawalsResult.rows;
-
-      const accidentsQuery = `
-      SELECT 
-        accident_date,
-        location,
-        acd_code,
-        description
-      FROM accident_reports
-      WHERE mvr_id = $1
-      ORDER BY accident_date DESC
-    `;
-      const accidentsResult = await client.query(accidentsQuery, [mvrId]);
-      const accidents = accidentsResult.rows;
-
-      const crimesQuery = `
-      SELECT 
-        crime_date,
-        conviction_date,
-        offense_code,
-        description
-      FROM traffic_crimes
-      WHERE mvr_id = $1
-      ORDER BY crime_date DESC
-    `;
-      const crimesResult = await client.query(crimesQuery, [mvrId]);
-      const crimes = crimesResult.rows;
-
-      const transactionQuery = `
-      SELECT 
-        seller_id,
-        buyer_id,
-        state_code
-      FROM transactions
-      WHERE mvr_id = $1
-    `;
-      const transactionResult = await client.query(transactionQuery, [mvrId]);
-      const transaction = transactionResult.rows[0] || null;
-
-      const mvrRecord = {
-        drivers_license_number: user.drivers_license_number,
-        full_legal_name: user.full_legal_name,
-        birthdate: user.birthdate,
-        weight: user.weight,
-        sex: user.sex,
-        height: user.height,
-        hair_color: user.hair_color,
-        eye_color: user.eye_color,
-        medical_information: user.medical_information,
-        address: user.address,
-        city: user.city,
-        issued_state_code: user.issued_state_code,
-
-        claim_number: mvr.claim_number,
-        order_id: mvr.order_id,
-        order_date: mvr.order_date,
-        report_date: mvr.report_date,
-        reference_number: mvr.reference_number,
-        system_use: mvr.system_use,
-        mvr_type: mvr.mvr_type,
-        state_code: mvr.state_code,
-        purpose: mvr.purpose,
-        time_frame: mvr.time_frame,
-        is_certified: mvr.is_certified,
-        total_points: mvr.total_points,
-
-        licenseInfo,
-        violations,
-        withdrawals,
-        accidents,
-        crimes,
-        transaction,
-      };
-
-      await logToFirehose(user);
-
+    if (mainResult.rows.length === 0) {
       return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mvrRecord),
-      };
-    } catch (error: any) {
-      console.error("Error retrieving MVR record:", error);
-      return {
-        statusCode: 500,
+        statusCode: 404,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          error: error.message || "Internal server error",
+          error: "No user found with this driver's license number",
         }),
       };
-    } finally {
+    }
+
+    const userData = mainResult.rows[0];
+    
+    if (!userData.current_mvr_id) {
+      return {
+        statusCode: 404,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "User found but no MVR ID associated",
+        }),
+      };
+    }
+
+    const mvrRecord = {
+      drivers_license_number: userData.drivers_license_number,
+      full_legal_name: userData.full_legal_name,
+      birthdate: userData.birthdate,
+      weight: userData.weight,
+      sex: userData.sex,
+      height: userData.height,
+      hair_color: userData.hair_color,
+      eye_color: userData.eye_color,
+      medical_information: userData.medical_information,
+      address: userData.address,
+      city: userData.city,
+      issued_state_code: userData.issued_state_code,
+      zip: userData.zip,
+      phone_number: userData.phone_number,
+      email: userData.email,
+      claim_number: userData.claim_number,
+      order_id: userData.order_id,
+      order_date: userData.order_date,
+      report_date: userData.report_date,
+      reference_number: userData.reference_number,
+      system_use: userData.system_use,
+      mvr_type: userData.mvr_type,
+      state_code: userData.state_code,
+      purpose: userData.purpose,
+      time_frame: userData.time_frame,
+      is_certified: userData.is_certified,
+      total_points: userData.total_points,
+      licenseInfo: userData.license_class ? {
+        license_class: userData.license_class,
+        issue_date: userData.issue_date,
+        expiration_date: userData.expiration_date,
+        status: userData.status,
+        restrictions: userData.restrictions,
+      } : null,
+      violations: violationsResult.rows,
+      withdrawals: withdrawalsResult.rows,
+      accidents: accidentsResult.rows,
+      crimes: crimesResult.rows,
+      transaction: userData.seller_id ? {
+        seller_id: userData.seller_id,
+        buyer_id: userData.buyer_id,
+        state_code: userData.transaction_state,
+      } : null,
+    };
+
+    const response = {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mvrRecord),
+    };
+
+    setImmediate(() => {
+      sendAuditLog(userData, company_id).catch(err => console.error("Firehose log failed:", err));
+    });
+
+    return response;
+    
+  } catch (error: unknown) {
+    console.error("Error retrieving MVR record:", error);
+    const err = ensureError(error);
+    return {
+      statusCode: 500,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        error: err.message || "Internal server error",
+      }),
+    };
+  } finally {
+    if (client!) {
       client.release();
     }
-  } catch (error) {
-    console.error("Lambda handler error:", error);
-    throw error;
   }
 };
+
+function ensureError(value: unknown): Error {
+  if (value instanceof Error) return value
+
+  let stringified = '[Unable to stringify the thrown value]'
+  try {
+    stringified = JSON.stringify(value)
+  } catch {}
+
+  const error = new Error(`This value was thrown as is, not through an Error: ${stringified}`)
+  return error
+}

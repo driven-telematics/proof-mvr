@@ -11,7 +11,7 @@ Globals:
     Environment:
       Variables:
         S3_AUDIT_BUCKET: mvr-audit-logs
-        AUDIT_FIREHOSE_NAME: MVRAuditFirehose
+        AUDIT_FIREHOSE_NAME: MVR_AUDIT_STREAM
 
 Resources:
   MVRAuditLogGroup:
@@ -59,30 +59,10 @@ Resources:
       Architectures:
         - x86_64
       Timeout: 300
-    Metadata:
-      BuildMethod: esbuild
-      BuildProperties:
-        Minify: true
-        Target: es2020
-        Sourcemap: true
-        EntryPoints:
-          - app.ts
-
-  HelloWorldFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: hello-world/
-      Handler: app.lambdaHandler
-      Runtime: nodejs22.x
-      Architectures:
-        - x86_64
-      VpcConfig:
-        SecurityGroupIds:
-          - sg-09b13c689ca54eb6e
-        SubnetIds:
-          - subnet-0bbaa5d7391f2f774
-          - subnet-0efb623070a90811d
-      Policies:
+    Environment:
+        Variables:
+          AUDIT_PROCESSOR_LAMBDA_NAME: !Ref IndividualLogProcessorFunction
+    Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
@@ -94,13 +74,7 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
-      Events:
-        HelloWorld:
-          Type: Api
-          Properties:
-            Path: /hello
-            Method: get
+              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/Individual-Log-Processor
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -109,6 +83,40 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - app.ts
+
+  IndividualLogProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: individual-log-processor/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      Timeout: 300
+    Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !GetAtt MVRAuditLogGroup.Arn
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
+
+  LogProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LogProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: firehose.amazonaws.com
+      SourceArn: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
 
   AddMVRFunction:
     Type: AWS::Serverless::Function
@@ -126,26 +134,19 @@ Resources:
           - subnet-0efb623070a90811d
       Environment:
         Variables:
-          USER_AND_PASS_ARN: "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-postgresql-username-and-password-sULrF1"
           OTHER_VARS_ARN: "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: !GetAtt MVRAuditLogGroup.Arn
-            - Effect: Allow
-              Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
+              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
             - Effect: Allow
               Action: 
                 -  secretsmanager:GetSecretValue
               Resource: 
-                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-postgresql-username-and-password-sULrF1"
                 - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         AddMVR:
@@ -181,14 +182,9 @@ Resources:
           Statement:
             - Effect: Allow
               Action:
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: !GetAtt MVRAuditLogGroup.Arn
-            - Effect: Allow
-              Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
+              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
       Events:
         BatchAddMVR:
           Type: Api
@@ -223,14 +219,9 @@ Resources:
           Statement:
             - Effect: Allow
               Action:
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: !GetAtt MVRAuditLogGroup.Arn
-            - Effect: Allow
-              Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
+              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
       Events:
         GetMVR:
           Type: Api
@@ -262,10 +253,6 @@ Resources:
       AutoConfigurationEnabled: "true"
 
 Outputs:
-  HelloWorldApi:
-    Description: API Gateway endpoint URL for Prod stage for Hello World function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
-
   AddMVRApi:
     Description: API Gateway endpoint URL for Prod stage for adding MVR function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
@@ -288,4 +275,4 @@ Outputs:
 
   MVRAuditFirehose:
     Description: Kinesis Data Firehose stream for MVR audit logs
-    Value: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVRAuditFirehose
+    Value: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM

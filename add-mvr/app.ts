@@ -3,6 +3,13 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { Pool, PoolClient } from 'pg';
 import { format, subDays } from 'date-fns';
+import {
+  FirehoseClient,
+  PutRecordCommand
+} from "@aws-sdk/client-firehose";
+
+const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
+const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
 
 // TODO: 
 // Delete the MVR record and the corresponding data when a new one is put in place to replace it
@@ -80,12 +87,35 @@ export interface MVRData {
 }
  
 interface DatabaseConfigVariables {
-  username?: string;
-  password?: string;
-  MVR_DB_HOST?: string; 
-  MVR_DB_NAME?: string; 
+  MVR_DB_HOST?: string;
+  MVR_DB_NAME?: string;
   MVR_DB_PORT?: string;
+  AWS_REGION?: string;
+  MVR_DB_USERNAME?: string;
+  MVR_DB_PASSWORD?: string;
 }
+
+interface User {
+  id: string;
+  drivers_license_number: string;
+  full_legal_name: string;
+  birthdate: Date;
+  weight: string;
+  sex: string;
+  height: string;
+  hair_color: string;
+  eye_color: string;
+  medical_information: string;
+  address: string;
+  city: string;
+  issued_state_code: string;
+  zip: number;
+  phone_number: number;
+  email: string;
+  current_mvr_id: number;
+}
+
+const THIRTY_DAYS = 30;
 
 export const getSecretValue = async (secretName: string): Promise<DatabaseConfigVariables> => {
   if (!secretName) {
@@ -115,17 +145,21 @@ export const getSecretValue = async (secretName: string): Promise<DatabaseConfig
 
 export const createDatabasePool = async (): Promise<Pool> => {
   try {
-    const usernameAndPasswordSecret = await getSecretValue("mvr-postgresql-username-and-password");
-    const otherValuesSecret = await getSecretValue("mvr-global-environments")
+    const secrets = await getSecretValue("mvr-global-environments");
     const poolConfig = {
-      host: otherValuesSecret.MVR_DB_HOST,
-      database: otherValuesSecret.MVR_DB_NAME,
-      user: usernameAndPasswordSecret.username,
-      password: usernameAndPasswordSecret.password,
-      port: parseInt(otherValuesSecret.MVR_DB_PORT || '5432'),
+      host: secrets.MVR_DB_HOST,
+      database: secrets.MVR_DB_NAME,
+      user: secrets.MVR_DB_USERNAME ,
+      password: secrets.MVR_DB_PASSWORD,
+      port: parseInt(secrets.MVR_DB_PORT || "5432"),
       ssl: {
-        rejectUnauthorized: false 
-      }
+        rejectUnauthorized: false,
+      },
+      max: 20, 
+      idleTimeoutMillis: 30000, 
+      connectionTimeoutMillis: 2000, 
+      statement_timeout: 5000,
+      query_timeout: 5000, 
     };
     const dbPool = new Pool(poolConfig);
     return dbPool;
@@ -156,7 +190,7 @@ async function checkExistingUser(client: PoolClient, driversLicense: string): Pr
     return { userId, currentMvrId, hasRecentMvr: false };
   }
   
-  const thirtyDaysAgo = format(subDays(new Date(), 30), 'yyyy-MM-dd');
+  const thirtyDaysAgo = format(subDays(new Date(), THIRTY_DAYS), 'yyyy-MM-dd');
   
   const mvrQuery = `
     SELECT id 
@@ -372,84 +406,196 @@ async function addTrafficCrimes(client: PoolClient, crimes: MVRCrime[], mvrId: n
   }
 }
 
+async function getUserData(client: PoolClient, userId: number): Promise<User> {
+  const query = `
+    SELECT id, drivers_license_number, full_legal_name, birthdate, 
+           weight, sex, height, hair_color, eye_color, medical_information,
+           address, city, issued_state_code, zip, phone_number, email, current_mvr_id
+    FROM users 
+    WHERE id = $1
+  `;
+  
+  const result = await client.query(query, [userId]);
+  if (result.rows.length === 0) {
+    throw new Error(`User with id ${userId} not found`);
+  }
+  
+  return result.rows[0];
+}
+
+async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData, operation = "ADD_MVR"): Promise<void> {
+  console.log(`Attempting to send audit log to Firehose: ${DELIVERY_STREAM}`);
+  
+  const payload = {
+    drivers_license_number: userData.drivers_license_number,
+    mvr_id: userData.current_mvr_id,
+    user_id: userData.id,
+    full_legal_name: userData.full_legal_name,
+    issued_state_code: userData.issued_state_code,
+    
+    order_id: mvrData.order_id,
+    order_date: mvrData.order_date,
+    report_date: mvrData.report_date,
+    state_code: mvrData.state_code,
+    mvr_type: mvrData.mvr_type,
+    is_certified: mvrData.is_certified,
+    total_points: mvrData.total_points,
+    
+    timestamp: new Date().toISOString(),
+    operation: operation,
+    company_partition: company_id,
+    company_id: company_id,
+    function_name: 'add-mvr-lambda',
+    success: true,
+    affected_records_count: 1,
+    operation_category: 'WRITE' as const
+  };
+
+  console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await firehose.send(
+      new PutRecordCommand({
+        DeliveryStreamName: DELIVERY_STREAM,
+        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
+      })
+    );
+    console.log(`Firehose response:`, response);
+  } catch (error) {
+    console.error(`Firehose error:`, error);
+    throw error;
+  }
+}
+
 export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   let mvrData: MVRData;
+  let company_id: string | undefined;
+  
   try {
     if (!event.body) {
       throw new Error('Missing request body');
     }
-    mvrData = JSON.parse(event.body) as MVRData;
+    const body = JSON.parse(event.body);
+    mvrData = body.mvr;
+    company_id = body.company_id;
     
     if (!mvrData.drivers_license_number) {
       throw new Error('Required fields missing');
     }
-  } catch (error: any) {
+    
+    if (!company_id) {
+      throw new Error('Company ID is required');
+    }
+  } catch (error: unknown) {
     console.error('Input validation error:', error);
+    const err = ensureError(error);
     return {
       statusCode: 400,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: error.message || 'Invalid request data' })
+      body: JSON.stringify({ error: err.message || 'Invalid request data' })
     };
   }
   
+  const pool: Pool = await createDatabasePool();
+  const client: PoolClient = await pool.connect();
+  
   try {
-    const pool: Pool = await createDatabasePool();
-    const client: PoolClient = await pool.connect();
-    try {
-      await client.query('BEGIN');
-    
-      const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
+    await client.query('BEGIN');
   
-      if (userId && hasRecentMvr) {
-        await client.query('COMMIT');
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
-        };
-      }
-  
-      const mvrId = await createMvrRecord(client, mvrData);
-      
-      if (userId) {
-        await updateUserMvrId(client, userId, mvrId);
-      } else {
-        await createUser(client, mvrData, mvrId);
-      }
-  
-      await addDriverLicenseInfo(client, mvrData, mvrId);
-      await addTrafficViolations(client, mvrData.violations || [], mvrId);
-      await addWithdrawals(client, mvrData.withdrawals || [], mvrId);
-      await addAccidents(client, mvrData.accidents || [], mvrId);
-      await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
-      
+    const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
+
+    if (userId && hasRecentMvr) {
       await client.query('COMMIT');
-      
       return {
-        statusCode: 201,
+        statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
-          mvr_id: mvrId
+        body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
+      };
+    }
+
+    const mvrId = await createMvrRecord(client, mvrData);
+    
+    let finalUserId: number;
+    if (userId) {
+      await updateUserMvrId(client, userId, mvrId);
+      finalUserId = userId;
+    } else {
+      finalUserId = await createUser(client, mvrData, mvrId);
+    }
+
+    await addDriverLicenseInfo(client, mvrData, mvrId);
+    await addTrafficViolations(client, mvrData.violations || [], mvrId);
+    await addWithdrawals(client, mvrData.withdrawals || [], mvrId);
+    await addAccidents(client, mvrData.accidents || [], mvrId);
+    await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
+    
+    await client.query('COMMIT');
+
+    const userData = await getUserData(client, finalUserId);
+    
+    try {
+      await sendAuditLog(userData, company_id, mvrData, userId ? "UPDATE_MVR" : "CREATE_MVR");
+      console.log("Audit log sent successfully");
+    } catch (auditError) {
+      console.error("Audit log failed:", auditError);
+    }
+    
+    return {
+      statusCode: 201,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        message: userId ? 'User MVR updated successfully' : 'New user and MVR created successfully',
+        mvr_id: mvrId,
+        user_id: finalUserId
+      })
+    };
+    
+  } catch (error: unknown) {
+    await client.query('ROLLBACK');
+    console.error('Error processing MVR:', error);
+    
+    try {
+      const failurePayload = {
+        drivers_license_number: mvrData.drivers_license_number,
+        company_id: company_id,
+        timestamp: new Date().toISOString(),
+        operation: "CREATE_MVR_FAILED",
+        function_name: 'add-mvr-lambda',
+        success: false,
+        error_message: error instanceof Error ? error.message : 'Unknown error',
+        operation_category: 'WRITE' as const
+      };
+      
+      await firehose.send(
+        new PutRecordCommand({
+          DeliveryStreamName: DELIVERY_STREAM,
+          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n") }
         })
-      };
-      
-    } catch (error: any) {
-  
-      await client.query('ROLLBACK');
-      console.error('Error processing MVR:', error);
-      
-      return {
-        statusCode: 500,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: error.message || 'Internal server error' })
-      };
-      
-    } finally {
-      client.release();
+      );
+    } catch (auditError) {
+      console.error("Failed to send failure audit log:", auditError);
     }
-  } catch (error) {
-      console.error('Lambda handler error:', error);
-      throw error;
-    }
+    
+    const err = ensureError(error);
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: err.message || 'Internal server error' })
+    };
+    
+  } finally {
+    client.release();
+  }
 };
+
+function ensureError(value: unknown): Error {
+  if (value instanceof Error) return value
+
+  let stringified = '[Unable to stringify the thrown value]'
+  try {
+    stringified = JSON.stringify(value)
+  } catch {}
+
+  const error = new Error(`This value was thrown as is, not through an Error: ${stringified}`)
+  return error
+}
