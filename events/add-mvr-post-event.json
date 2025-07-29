@@ -1,24 +1,19 @@
 {
-  "body": "{\"drivers_license_number\":\"DL123456789\",\"full_legal_name\":\"John Michael Smith\",\"birthdate\":\"1985-06-15\",\"weight\":\"185 lbs\",\"sex\":\"M\",\"height\":\"5'11\\\"\",\"hair_color\":\"Brown\",\"eye_color\":\"Blue\",\"medical_information\":\"Corrective lenses required\",\"address\":\"123 Main Street, Apt 4B\",\"city\":\"Springfield\",\"issued_state_code\":\"IL\",\"zip\":62701,\"phone_number\":2175551234,\"email\":\"john.smith@example.com\",\"claim_number\":\"CLM20250513001\",\"order_id\":\"ORD98765432\",\"order_date\":\"2025-05-13\",\"report_date\":\"2025-05-13\",\"reference_number\":\"REF-ABC-12345\",\"system_use\":\"Insurance Verification\",\"mvr_type\":\"Standard\",\"state_code\":\"IL\",\"purpose\":\"Employment\",\"time_frame\":\"3-Year\",\"is_certified\":true,\"total_points\":3,\"license_class\":\"D\",\"issue_date\":\"2022-03-10\",\"expiration_date\":\"2026-06-15\",\"status\":\"Valid\",\"restrictions\":\"Corrective Lenses\",\"violations\":[{\"violation_date\":\"2023-09-12\",\"conviction_date\":\"2023-10-05\",\"location\":\"Springfield, IL\",\"points_assessed\":2,\"violation_code\":\"SP21\",\"description\":\"Speeding 15-20 mph over limit\"},{\"violation_date\":\"2024-02-28\",\"conviction_date\":\"2024-03-15\",\"location\":\"Chicago, IL\",\"points_assessed\":1,\"violation_code\":\"TS11\",\"description\":\"Failure to obey traffic signal\"}],\"withdrawals\":[{\"effective_date\":\"2022-11-01\",\"eligibility_date\":\"2022-12-01\",\"action_type\":\"Suspension\",\"reason\":\"Unpaid tickets\"}],\"accidents\":[{\"accident_date\":\"2024-01-10\",\"location\":\"Interstate 55, Springfield, IL\",\"acd_code\":\"AC3\",\"description\":\"Minor property damage accident, no injuries\"}],\"crimes\":[{\"crime_date\":\"2023-07-04\",\"conviction_date\":\"2023-08-15\",\"offense_code\":\"DU1\",\"description\":\"Operating vehicle with BAC .08 or greater\"}],\"transaction\":{\"seller_id\":123,\"buyer_id\":456}}",
-  "resource": "/add-mvr",
-  "path": "/add-mvr",
-  "httpMethod": "POST",
-  "isBase64Encoded": false,
-  "queryStringParameters": {},
-  "multiValueQueryStringParameters": {},
-  "pathParameters": {},
-  "stageVariables": {},
-  "headers": {
-    "Accept": "application/json",
-    "Content-Type": "application/json"
-  },
-  "requestContext": {
-    "resourceId": "123456",
-    "resourcePath": "/add-mvr",
-    "httpMethod": "POST",
-    "path": "/add-mvr",
-    "accountId": "123456789012",
-    "protocol": "HTTP/1.1",
-    "stage": "dev"
-  }
+  "timestamp": "2025-07-15T18:16:53.572Z",
+  "date": "2025-07-15",
+  "hour": "18",
+  "operation": "GET_MVR",
+  "user_id": 54,
+  "company_id": "Allstate",
+  "success": true,
+  "function_name": "unknown",
+  "drivers_license_number": "D8457293610",
+  "affected_records_count": 0,
+  "operation_category": "UNKNOWN",
+  "year": "2025",
+  "month": "07",
+  "day": "15",
+  "action": "GET_MVR",
+  "s3_partition": "company=Allstate/action=GET_MVR/year=2025/month=07/day=15",
+  "raw_log": "{\"drivers_license_number\":\"D8457293610\",\"mvr_id\":63,\"user_id\":54,\"timestamp\":\"2025-07-15T18:16:53.572Z\",\"operation\":\"GET_MVR\",\"issued_state_code\":\"TX\",\"full_legal_name\":\"Sample John Sample Anderson\",\"company_partition\":\"Allstate\",\"company_id\":\"Allstate\"}"
 }

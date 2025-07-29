@@ -27,6 +27,8 @@ interface ProcessedLogRecord {
   action: string; 
 }
 
+// were logging who grabbed it, but we need who it was bought from. That is who needs to be audited not the retriever 
+// we need both but the one who put it in is more important 
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
 const DELIVERY_STREAM =  "Individual-Log-Processor";

@@ -10,6 +10,7 @@ import {
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
 const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
+let globalPool: Pool | null = null;
 
 // TODO: 
 // Delete the MVR record and the corresponding data when a new one is put in place to replace it
@@ -79,6 +80,7 @@ export interface MVRData {
   expiration_date?: string;
   status?: string;
   restrictions?: string;
+  date_uploaded?: Date;
   
   violations?: MVRViolation[];
   withdrawals?: MVRWithdrawal[];
@@ -144,6 +146,10 @@ export const getSecretValue = async (secretName: string): Promise<DatabaseConfig
 };
 
 export const createDatabasePool = async (): Promise<Pool> => {
+  if (globalPool) {
+    return globalPool;
+  }
+
   try {
     const secrets = await getSecretValue("mvr-global-environments");
     const poolConfig = {
@@ -161,14 +167,28 @@ export const createDatabasePool = async (): Promise<Pool> => {
       statement_timeout: 5000,
       query_timeout: 5000, 
     };
-    const dbPool = new Pool(poolConfig);
-    return dbPool;
-
+    
+    globalPool = new Pool(poolConfig);
+    
+    
+    return globalPool;
   } catch (error) {
     console.error('Failed to create database pool:', error);
     throw error;
   }
 };
+
+
+async function logSelectOperation(client: PoolClient, tableName: string, payload?: any): Promise<void> {
+  try {
+    await client.query(
+      'SELECT audit_select_function($1, $2)',
+      [tableName, payload ? JSON.stringify(payload) : null]
+    );
+  } catch (error) {
+    console.error('Error logging SELECT operation:', error);
+  }
+}
 
 async function checkExistingUser(client: PoolClient, driversLicense: string): Promise<{ userId: number | null, currentMvrId: number | null, hasRecentMvr: boolean }> {
   const userQuery = `
@@ -178,6 +198,8 @@ async function checkExistingUser(client: PoolClient, driversLicense: string): Pr
   `;
   
   const userResult = await client.query(userQuery, [driversLicense]);
+  
+  await logSelectOperation(client, 'users', { drivers_license_number: driversLicense, query_type: 'check_existing_user' });
   
   if (userResult.rows.length === 0) {
     return { userId: null, currentMvrId: null, hasRecentMvr: false };
@@ -195,10 +217,13 @@ async function checkExistingUser(client: PoolClient, driversLicense: string): Pr
   const mvrQuery = `
     SELECT id 
     FROM mvr_records 
-    WHERE id = $1 AND order_date >= $2
+    WHERE id = $1 AND date_uploaded >= $2
   `;
   
   const mvrResult = await client.query(mvrQuery, [currentMvrId, thirtyDaysAgo]);
+  
+  await logSelectOperation(client, 'mvr_records', { mvr_id: currentMvrId, query_type: 'check_recent_mvr' });
+  
   const hasRecentMvr = mvrResult.rows.length > 0;
   
   return { userId, currentMvrId, hasRecentMvr };
@@ -209,9 +234,9 @@ async function createMvrRecord(client: PoolClient, mvrData: MVRData): Promise<nu
     INSERT INTO mvr_records (
       claim_number, order_id, order_date, report_date, 
       reference_number, system_use, mvr_type, state_code, 
-      purpose, time_frame, is_certified, total_points
+      purpose, time_frame, is_certified, total_points, date_uploaded
     ) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
     RETURNING id
   `;
   
@@ -416,6 +441,9 @@ async function getUserData(client: PoolClient, userId: number): Promise<User> {
   `;
   
   const result = await client.query(query, [userId]);
+  
+  await logSelectOperation(client, 'users', { user_id: userId, query_type: 'get_user_data' });
+  
   if (result.rows.length === 0) {
     throw new Error(`User with id ${userId} not found`);
   }
@@ -470,6 +498,7 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
 export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   let mvrData: MVRData;
   let company_id: string | undefined;
+  let permissible_purpose: string | undefined;
   
   try {
     if (!event.body) {
@@ -477,7 +506,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     }
     const body = JSON.parse(event.body);
     mvrData = body.mvr;
+    mvrData.date_uploaded = new Date();
     company_id = body.company_id;
+    permissible_purpose = body.permissible_purpose;
     
     if (!mvrData.drivers_license_number) {
       throw new Error('Required fields missing');
@@ -485,6 +516,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     
     if (!company_id) {
       throw new Error('Company ID is required');
+    }
+    if (!checkPermissiblePurpose(permissible_purpose || '')) {
+      throw new Error('Invalid purpose for MVR request');
     }
   } catch (error: unknown) {
     console.error('Input validation error:', error);
@@ -587,6 +621,18 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     client.release();
   }
 };
+
+// 'EMPLOYMENT', 
+// 'INSURANCE', 
+// 'LEGAL', 
+// 'GOVERNMENT',
+function checkPermissiblePurpose(purpose: string): boolean {
+  const permissiblePurposes = [
+    'UNDERWRITING',
+    'FRAUD'
+  ];
+  return permissiblePurposes.includes(purpose);
+}
 
 function ensureError(value: unknown): Error {
   if (value instanceof Error) return value

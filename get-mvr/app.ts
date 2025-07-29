@@ -126,13 +126,18 @@ export const lambdaHandler = async (
 ): Promise<APIGatewayProxyResult> => {
   let drivers_license_number: string;
   let company_id: string;
+  let permissible_purpose: string;
 
   try {
     if (!event.body) throw new Error("Missing request body");
     const body = JSON.parse(event.body);
     drivers_license_number = body.drivers_license_number;
     company_id = body.company_id;
+    permissible_purpose = body.permissible_purpose;
     if (!drivers_license_number) throw new Error("Missing Drivers License");
+    if (!checkPermissiblePurpose(permissible_purpose || '')) {
+      throw new Error('Invalid purpose for MVR request');
+    }
   } catch (error: unknown) {
     console.error("Input validation error:", error);
     const err = ensureError(error);
@@ -309,6 +314,7 @@ export const lambdaHandler = async (
       time_frame: userData.time_frame,
       is_certified: userData.is_certified,
       total_points: userData.total_points,
+      date_uploaded: userData.date_uploaded,
       licenseInfo: userData.license_class ? {
         license_class: userData.license_class,
         issue_date: userData.issue_date,
@@ -355,6 +361,18 @@ export const lambdaHandler = async (
     }
   }
 };
+
+function checkPermissiblePurpose(purpose: string): boolean {
+  const permissiblePurposes = [
+    'EMPLOYMENT', 
+    'INSURANCE', 
+    'LEGAL', 
+    'GOVERNMENT',
+    'UNDERWRITING',
+    'FRAUD'
+  ];
+  return permissiblePurposes.includes(purpose);
+}
 
 function ensureError(value: unknown): Error {
   if (value instanceof Error) return value

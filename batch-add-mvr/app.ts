@@ -111,6 +111,7 @@ export interface MVRData {
   expiration_date?: string;
   status?: string;
   restrictions?: string;
+  date_uploaded?: Date;
 
   violations?: MVRViolation[];
   withdrawals?: MVRWithdrawal[];
@@ -243,7 +244,7 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
   }
 }
 
-async function sendBatchAuditLog(company_id: string, results: BatchProcessResult[], operation: string = "BATCH_PROCESS_COMPLETE"): Promise<void> {
+async function sendBatchAuditLog(company_id: string, results: BatchProcessResult[], operation = "BATCH_PROCESS_COMPLETE"): Promise<void> {
   console.log(`Sending batch completion audit log to Firehose: ${DELIVERY_STREAM}`);
   
   const payload = {
@@ -310,7 +311,7 @@ async function checkExistingUser(
   const mvrQuery = `
     SELECT id 
     FROM mvr_records 
-    WHERE id = $1 AND order_date >= $2
+    WHERE id = $1 AND date_uploaded >= $2
   `;
 
   const mvrResult = await client.query(mvrQuery, [currentMvrId, thirtyDaysAgo]);
@@ -327,9 +328,9 @@ async function createMvrRecord(
     INSERT INTO mvr_records (
       claim_number, order_id, order_date, report_date, 
       reference_number, system_use, mvr_type, state_code, 
-      purpose, time_frame, is_certified, total_points
+      purpose, time_frame, is_certified, total_points, date_uploaded
     ) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING id
   `;
 
@@ -348,6 +349,7 @@ async function createMvrRecord(
     mvrData.time_frame || null,
     mvrData.is_certified || false,
     mvrData.total_points || 0,
+    mvrData.date_uploaded ? mvrData.date_uploaded : new Date(),
   ];
 
   const result = await client.query(query, params);
@@ -439,38 +441,6 @@ async function addDriverLicenseInfo(
   await client.query(query, params);
 }
 
-async function addTrafficViolations(
-  client: PoolClient,
-  violations: MVRViolation[],
-  mvrId: number,
-): Promise<void> {
-  if (!violations || violations.length === 0) {
-    return;
-  }
-
-  for (const violation of violations) {
-    const query = `
-      INSERT INTO traffic_violations (
-        mvr_id, violation_date, conviction_date, location, 
-        points_assessed, violation_code, description
-      ) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `;
-
-    const params = [
-      mvrId,
-      violation.violation_date,
-      violation.conviction_date || null,
-      violation.location || null,
-      violation.points_assessed || 0,
-      violation.violation_code || null,
-      violation.description || null,
-    ];
-
-    await client.query(query, params);
-  }
-}
-
 async function addWithdrawals(
   client: PoolClient,
   withdrawals: MVRWithdrawal[],
@@ -480,24 +450,56 @@ async function addWithdrawals(
     return;
   }
 
-  for (const withdrawal of withdrawals) {
-    const query = `
-      INSERT INTO withdrawals (
-        mvr_id, effective_date, eligibility_date, action_type, reason
-      ) 
-      VALUES ($1, $2, $3, $4, $5)
-    `;
+  const query = `
+    INSERT INTO withdrawals (
+      mvr_id, effective_date, eligibility_date, action_type, reason
+    )
+    VALUES ${withdrawals.map((_, i) => {
+      const base = i * 5;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+    }).join(",\n")}
+  `;
 
-    const params = [
-      mvrId,
-      withdrawal.effective_date,
-      withdrawal.eligibility_date || null,
-      withdrawal.action_type || null,
-      withdrawal.reason || null,
-    ];
+  const params = withdrawals.flatMap(w => [
+    mvrId,
+    w.effective_date,
+    w.eligibility_date || null,
+    w.action_type || null,
+    w.reason || null,
+  ]);
 
-    await client.query(query, params);
-  }
+  await client.query(query, params);
+}
+
+async function addTrafficViolations(
+  client: PoolClient,
+  violations: MVRViolation[],
+  mvrId: number,
+): Promise<void> {
+  if (!violations || violations.length === 0) return;
+
+  const query = `
+    INSERT INTO traffic_violations (
+      mvr_id, violation_date, conviction_date, location, 
+      points_assessed, violation_code, description
+    )
+    VALUES ${violations.map((_, i) => {
+      const base = i * 7;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
+    }).join(",\n")}
+  `;
+
+  const params = violations.flatMap(v => [
+    mvrId,
+    v.violation_date,
+    v.conviction_date || null,
+    v.location || null,
+    v.points_assessed || 0,
+    v.violation_code || null,
+    v.description || null,
+  ]);
+
+  await client.query(query, params);
 }
 
 async function addAccidents(
@@ -505,28 +507,27 @@ async function addAccidents(
   accidents: MVRAccident[],
   mvrId: number,
 ): Promise<void> {
-  if (!accidents || accidents.length === 0) {
-    return;
-  }
+  if (!accidents || accidents.length === 0) return;
 
-  for (const accident of accidents) {
-    const query = `
-      INSERT INTO accident_reports (
-        mvr_id, accident_date, location, acd_code, description
-      ) 
-      VALUES ($1, $2, $3, $4, $5)
-    `;
+  const query = `
+    INSERT INTO accident_reports (
+      mvr_id, accident_date, location, acd_code, description
+    )
+    VALUES ${accidents.map((_, i) => {
+      const base = i * 5;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+    }).join(",\n")}
+  `;
 
-    const params = [
-      mvrId,
-      accident.accident_date,
-      accident.location || null,
-      accident.acd_code || null,
-      accident.description || null,
-    ];
+  const params = accidents.flatMap(a => [
+    mvrId,
+    a.accident_date,
+    a.location || null,
+    a.acd_code || null,
+    a.description || null,
+  ]);
 
-    await client.query(query, params);
-  }
+  await client.query(query, params);
 }
 
 async function addTrafficCrimes(
@@ -534,28 +535,27 @@ async function addTrafficCrimes(
   crimes: MVRCrime[],
   mvrId: number,
 ): Promise<void> {
-  if (!crimes || crimes.length === 0) {
-    return;
-  }
+  if (!crimes || crimes.length === 0) return;
 
-  for (const crime of crimes) {
-    const query = `
-      INSERT INTO traffic_crimes (
-        mvr_id, crime_date, conviction_date, offense_code, description
-      ) 
-      VALUES ($1, $2, $3, $4, $5)
-    `;
+  const query = `
+    INSERT INTO traffic_crimes (
+      mvr_id, crime_date, conviction_date, offense_code, description
+    )
+    VALUES ${crimes.map((_, i) => {
+      const base = i * 5;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+    }).join(",\n")}
+  `;
 
-    const params = [
-      mvrId,
-      crime.crime_date,
-      crime.conviction_date || null,
-      crime.offense_code || null,
-      crime.description || null,
-    ];
+  const params = crimes.flatMap(c => [
+    mvrId,
+    c.crime_date,
+    c.conviction_date || null,
+    c.offense_code || null,
+    c.description || null,
+  ]);
 
-    await client.query(query, params);
-  }
+  await client.query(query, params);
 }
 
 async function processSingleMvr(
@@ -660,6 +660,7 @@ export const lambdaHandler = async (
   event: APIGatewayProxyEvent,
 ): Promise<APIGatewayProxyResult> => {
   let company_id: string | undefined;
+  let permissible_purpose: string | undefined;
   let mvrDataArray: MVRData[] = [];
 
   try {
@@ -671,6 +672,7 @@ export const lambdaHandler = async (
     
     company_id = requestData.company_id;
     mvrDataArray = requestData.batch_mvrs;
+    permissible_purpose = requestData.permissible_purpose;
 
     if (!company_id) {
       throw new Error("Company ID is required");
@@ -678,6 +680,10 @@ export const lambdaHandler = async (
 
     if (!Array.isArray(mvrDataArray) || mvrDataArray.length === 0) {
       throw new Error("batch_mvrs must be a non-empty array");
+    }
+
+    if (!checkPermissiblePurpose(permissible_purpose || '')) {
+      throw new Error('Invalid purpose for MVR request');
     }
 
   } catch (error: unknown) {
@@ -786,6 +792,18 @@ export const lambdaHandler = async (
     client.release();
   }
 };
+
+function checkPermissiblePurpose(purpose: string): boolean {
+  const permissiblePurposes = [
+    'EMPLOYMENT', 
+    'INSURANCE', 
+    'LEGAL', 
+    'GOVERNMENT',
+    'UNDERWRITING',
+    'FRAUD'
+  ];
+  return permissiblePurposes.includes(purpose);
+}
 
 function ensureError(value: unknown): Error {
   if (value instanceof Error) return value
