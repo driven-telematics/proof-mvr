@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-07-15T18:16:53.572Z",
+  "date": "2025-07-15",
+  "hour": "18",
+  "operation": "GET_MVR",
+  "user_id": 54,
+  "company_id": "Allstate",
+  "success": true,
+  "function_name": "unknown",
+  "drivers_license_number": "D8457293610",
+  "affected_records_count": 0,
+  "operation_category": "UNKNOWN",
+  "year": "2025",
+  "month": "07",
+  "day": "15",
+  "action": "GET_MVR",
+  "s3_partition": "company=Allstate/action=GET_MVR/year=2025/month=07/day=15",
+  "raw_log": "{\"drivers_license_number\":\"D8457293610\",\"mvr_id\":63,\"user_id\":54,\"timestamp\":\"2025-07-15T18:16:53.572Z\",\"operation\":\"GET_MVR\",\"issued_state_code\":\"TX\",\"full_legal_name\":\"Sample John Sample Anderson\",\"company_partition\":\"Allstate\",\"company_id\":\"Allstate\"}"
+}
