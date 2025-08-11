@@ -4,8 +4,10 @@ Description: >
   mvr-sam-app with comprehensive logging and S3 streaming
 
 Globals:
+  Api:
+    EndpointConfiguration: REGIONAL
   Function:
-    Timeout: 30
+    Timeout: 300
     LoggingConfig:
       LogFormat: JSON
     Environment:
@@ -49,6 +51,27 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt LogProcessorFunction.Arn
+
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: vpc-0cafd5af66a6edbfd
+      ServiceName: !Sub "com.amazonaws.us-east-1.secretsmanager"
+      VpcEndpointType: Interface
+      SubnetIds:
+          - subnet-0bbaa5d7391f2f774
+          - subnet-0efb623070a90811d
+      SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: '*'
+      PrivateDnsEnabled: true
 
   LogProcessorFunction:
     Type: AWS::Serverless::Function
@@ -163,6 +186,14 @@ Resources:
         EntryPoints:
           - app.ts
 
+  AddMVRInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AddMVRFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: "arn:aws:execute-api:us-east-1:619071327381:mujbnkns1k/*/POST/add-mvr"
+
   BatchAddMVRFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -185,6 +216,11 @@ Resources:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
               Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+            - Effect: Allow
+              Action: 
+                -  secretsmanager:GetSecretValue
+              Resource: 
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         BatchAddMVR:
           Type: Api
@@ -222,6 +258,11 @@ Resources:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
               Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+            - Effect: Allow
+              Action: 
+                -  secretsmanager:GetSecretValue
+              Resource: 
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         GetMVR:
           Type: Api

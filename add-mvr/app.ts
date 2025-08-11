@@ -525,7 +525,8 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     const err = ensureError(error);
     return {
       statusCode: 400,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json'
+       },
       body: JSON.stringify({ error: err.message || 'Invalid request data' })
     };
   }
