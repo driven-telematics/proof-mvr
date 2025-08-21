@@ -278,6 +278,17 @@ Resources:
         EntryPoints:
           - app.ts
 
+  # APIGateway:
+  #   Type: AWS::Serverless::Api
+  #   Properties:
+  #     Name: APIGateway
+  #     StageName: Prod
+  #     TracingEnabled: true
+  #     AccessLogSetting:
+  #       DestinationArn: arn:aws:logs:us-east-1:619071327381:log-group:api-gateway-access-logs:*
+  #       Format: >-
+  #         { "timestamp": "$context.requestTime", "ip": "$context.identity.sourceIp", "apiKeyId": "$context.identity.apiKeyId", "apiKeyName": "$context.identity.apiKey", "httpMethod": "$context.httpMethod", "path": "$context.resourcePath", "status": "$context.status", "latency": "$context.requestTimeEpoch", "requestBodyMasked": "$util.escapeJavaScript($input.json('$.nonSensitiveField'))", "context": "$context.requestId" }
+
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:

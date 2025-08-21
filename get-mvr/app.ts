@@ -118,7 +118,6 @@ async function sendAuditLog(userData: User, company_id: string): Promise<void> {
       Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
     })
   );
-
 }
 
 export const lambdaHandler = async (
@@ -127,17 +126,48 @@ export const lambdaHandler = async (
   let drivers_license_number: string;
   let company_id: string;
   let permissible_purpose: string;
+  let days: number;
+  let consent: boolean;
 
   try {
     if (!event.body) throw new Error("Missing request body");
     const body = JSON.parse(event.body);
+    
     drivers_license_number = body.drivers_license_number;
     company_id = body.company_id;
     permissible_purpose = body.permissible_purpose;
-    if (!drivers_license_number) throw new Error("Missing Drivers License");
+    days = body.days;
+    consent = body.consent;
+    
+    if (!drivers_license_number) throw new Error("Missing drivers_license_number");
+    if (!company_id) throw new Error("Missing company_id");
     if (!checkPermissiblePurpose(permissible_purpose || '')) {
-      throw new Error('Invalid purpose for MVR request');
+      throw new Error('Invalid permissible_purpose for MVR request');
     }
+    
+    if (days === undefined || days === null) {
+      throw new Error('Days field is required');
+    }
+    if (typeof days !== 'number') {
+      throw new Error('Days field must be a number');
+    }
+    if (!Number.isInteger(days)) {
+      throw new Error('Days field must be an integer');
+    }
+    if (days < 0) {
+      throw new Error('Days field must be non-negative');
+    }
+    
+    if (consent !== true) {
+      return {
+        statusCode: 403,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "Driver consent is required to access MVR records",
+        }),
+      };
+    }
+    
   } catch (error: unknown) {
     console.error("Input validation error:", error);
     const err = ensureError(error);
@@ -145,7 +175,7 @@ export const lambdaHandler = async (
       statusCode: 400,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        error: err.message || "Error Reading Drivers License",
+        error: err.message || "Error validating request parameters",
       }),
     };
   }
@@ -156,31 +186,94 @@ export const lambdaHandler = async (
     const pool: Pool = await createDatabasePool();
     client = await pool.connect();
     
-    const optimizedQuery = `
-      WITH user_data AS (
-        SELECT 
-          u.id,
-          u.drivers_license_number,
-          u.full_legal_name,
-          u.birthdate,
-          u.weight,
-          u.sex,
-          u.height,
-          u.hair_color,
-          u.eye_color,
-          u.medical_information,
-          u.address,
-          u.city,
-          u.issued_state_code,
-          u.zip,
-          u.phone_number,
-          u.email,
-          u.current_mvr_id
-        FROM users u
-        WHERE u.drivers_license_number = $1
-      )
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+    
+    const userCheckQuery = `
       SELECT 
-        ud.*,
+        id,
+        drivers_license_number,
+        full_legal_name,
+        birthdate,
+        weight,
+        sex,
+        height,
+        hair_color,
+        eye_color,
+        medical_information,
+        address,
+        city,
+        issued_state_code,
+        zip,
+        phone_number,
+        email,
+        current_mvr_id
+      FROM users 
+      WHERE drivers_license_number = $1
+    `;
+    
+    const userResult = await client.query(userCheckQuery, [drivers_license_number]);
+    
+    if (userResult.rows.length === 0) {
+      return {
+        statusCode: 404,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "No user found with this driver's license number",
+        }),
+      };
+    }
+    
+    let userData = userResult.rows[0];
+    
+    if (!userData.current_mvr_id) {
+      return {
+        statusCode: 404,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "User found but no MVR ID associated",
+        }),
+      };
+    }
+    
+    const mvrDateCheckQuery = `
+      SELECT id, report_date, order_date
+      FROM mvr_records 
+      WHERE id = $1 
+        AND (report_date >= $2 OR order_date >= $2)
+    `;
+    
+    const mvrDateResult = await client.query(mvrDateCheckQuery, [userData.current_mvr_id, cutoffDate]);
+    
+    if (mvrDateResult.rows.length === 0) {
+      return {
+        statusCode: 404,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: `No MVR found within the last ${days} days`,
+        }),
+      };
+    }
+    
+    const optimizedQuery = `
+      SELECT 
+        u.id,
+        u.drivers_license_number,
+        u.full_legal_name,
+        u.birthdate,
+        u.weight,
+        u.sex,
+        u.height,
+        u.hair_color,
+        u.eye_color,
+        u.medical_information,
+        u.address,
+        u.city,
+        u.issued_state_code,
+        u.zip,
+        u.phone_number,
+        u.email,
+        u.current_mvr_id,
         -- MVR Record data
         mvr.claim_number,
         mvr.order_id,
@@ -204,10 +297,11 @@ export const lambdaHandler = async (
         t.seller_id,
         t.buyer_id,
         t.state_code as transaction_state
-      FROM user_data ud
-      LEFT JOIN mvr_records mvr ON ud.current_mvr_id = mvr.id
-      LEFT JOIN drivers_license_info dli ON ud.current_mvr_id = dli.mvr_id
-      LEFT JOIN transactions t ON ud.current_mvr_id = t.mvr_id
+      FROM users u
+      JOIN mvr_records mvr ON u.current_mvr_id = mvr.id
+      LEFT JOIN drivers_license_info dli ON u.current_mvr_id = dli.mvr_id
+      LEFT JOIN transactions t ON u.current_mvr_id = t.mvr_id
+      WHERE u.drivers_license_number = $1
     `;
 
     const [mainResult, violationsResult, withdrawalsResult, accidentsResult, crimesResult] = await Promise.all([
@@ -264,27 +358,7 @@ export const lambdaHandler = async (
       `, [drivers_license_number])
     ]);
 
-    if (mainResult.rows.length === 0) {
-      return {
-        statusCode: 404,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: "No user found with this driver's license number",
-        }),
-      };
-    }
-
-    const userData = mainResult.rows[0];
-    
-    if (!userData.current_mvr_id) {
-      return {
-        statusCode: 404,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: "User found but no MVR ID associated",
-        }),
-      };
-    }
+    userData = mainResult.rows[0];
 
     const mvrRecord = {
       drivers_license_number: userData.drivers_license_number,
@@ -385,3 +459,4 @@ function ensureError(value: unknown): Error {
   const error = new Error(`This value was thrown as is, not through an Error: ${stringified}`)
   return error
 }
+
