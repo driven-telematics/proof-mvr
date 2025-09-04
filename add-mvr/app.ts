@@ -137,7 +137,7 @@ export const getSecretValue = async (secretName: string): Promise<DatabaseConfig
     }
 
     const secret = JSON.parse(response.SecretString);
-  
+         
     return secret;
   } catch (error) {
     console.error(`Failed to retrieve secret ${secretName}:`, error);
