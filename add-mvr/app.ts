@@ -499,6 +499,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
   let mvrData: MVRData;
   let company_id: string | undefined;
   let permissible_purpose: string | undefined;
+  let price_paid: number | undefined;
+  let redisclosure_authorization: boolean | undefined;
+  let storage_limitations: number | undefined;
   
   try {
     if (!event.body) {
@@ -513,6 +516,19 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     if (!mvrData.drivers_license_number) {
       throw new Error('Required fields missing');
     }
+
+    if(redisclosure_authorization == false || redisclosure_authorization === undefined) {
+      throw new HttpError('Redisclosure authorization is required', 403);
+    }
+
+    if(price_paid === undefined || price_paid < 0) {
+      throw new HttpError('Price paid is required and must be non-negative', 400);
+    }
+
+    if(storage_limitations === undefined || storage_limitations < 0) {
+      storage_limitations = 5 * 365; 
+    }
+
     
     if (!company_id) {
       throw new Error('Company ID is required');
@@ -521,12 +537,12 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
       throw new Error('Invalid purpose for MVR request');
     }
   } catch (error: unknown) {
-    console.error('Input validation error:', error);
     const err = ensureError(error);
+    const statusCode = err instanceof HttpError ? err.statusCode : 400;
+  
     return {
-      statusCode: 400,
-      headers: { 'Content-Type': 'application/json'
-       },
+      statusCode,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ error: err.message || 'Invalid request data' })
     };
   }
@@ -645,4 +661,11 @@ function ensureError(value: unknown): Error {
 
   const error = new Error(`This value was thrown as is, not through an Error: ${stringified}`)
   return error
+}
+
+class HttpError extends Error {
+  constructor(message: string, public statusCode: number) {
+    super(message);
+    this.name = 'HttpError';
+  }
 }
