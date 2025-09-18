@@ -3,6 +3,8 @@ Transform: AWS::Serverless-2016-10-31
 Description: >
   mvr-sam-app with comprehensive logging and S3 streaming
 
+# add api key to sam template 
+
 Globals:
   Api:
     EndpointConfiguration: REGIONAL
@@ -141,12 +143,32 @@ Resources:
       Principal: firehose.amazonaws.com
       SourceArn: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
 
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: arn:aws:iam::619071327381:role/APIGatewayCloudWatchLogsRole
+
+  MVRAPIService:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      AccessLogSetting:
+        DestinationArn: arn:aws:logs:us-east-1:619071327381:log-group:api-gateway-access-logs:*
+        Format: '{ "timestamp": "$context.requestTime", "ip": "$context.identity.sourceIp", "apiKeyId": "$context.identity.apiKeyId", "apiKeyName": "$context.identity.apiKey", "httpMethod": "$context.httpMethod", "path": "$context.resourcePath", "status": "$context.status", "latency": "$context.requestTimeEpoch", "requestBodyMasked": "$util.escapeJavaScript($input.json(''$.nonSensitiveField''))", "context": "$context.requestId" }'
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
   AddMVRFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: add-mvr/
       Handler: app.lambdaHandler
       Runtime: nodejs22.x
+      MemorySize: 1024
       Architectures:
         - x86_64
       VpcConfig:
@@ -175,8 +197,11 @@ Resources:
         AddMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /add-mvr
             Method: post
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -185,14 +210,6 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - app.ts
-
-  AddMVRInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt AddMVRFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: "arn:aws:execute-api:us-east-1:619071327381:mujbnkns1k/*/POST/add-mvr"
 
   BatchAddMVRFunction:
     Type: AWS::Serverless::Function
@@ -225,8 +242,11 @@ Resources:
         BatchAddMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /batch-add-mvr
             Method: post
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -267,8 +287,11 @@ Resources:
         GetMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /get-mvr
             Method: get
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -277,17 +300,6 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - app.ts
-
-  # APIGateway:
-  #   Type: AWS::Serverless::Api
-  #   Properties:
-  #     Name: APIGateway
-  #     StageName: Prod
-  #     TracingEnabled: true
-  #     AccessLogSetting:
-  #       DestinationArn: arn:aws:logs:us-east-1:619071327381:log-group:api-gateway-access-logs:*
-  #       Format: >-
-  #         { "timestamp": "$context.requestTime", "ip": "$context.identity.sourceIp", "apiKeyId": "$context.identity.apiKeyId", "apiKeyName": "$context.identity.apiKey", "httpMethod": "$context.httpMethod", "path": "$context.resourcePath", "status": "$context.status", "latency": "$context.requestTimeEpoch", "requestBodyMasked": "$util.escapeJavaScript($input.json('$.nonSensitiveField'))", "context": "$context.requestId" }
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
@@ -305,18 +317,6 @@ Resources:
       AutoConfigurationEnabled: "true"
 
 Outputs:
-  AddMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for adding MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
-
-  BatchAddMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for batch adding MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/batch-add-mvr/"
-
-  GetMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for getting an MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/get-mvr/"
-
   MVRAuditBucket:
     Description: The audit bucket
     Value: mvr-audit-logs

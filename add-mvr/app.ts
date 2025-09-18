@@ -452,7 +452,7 @@ async function getUserData(client: PoolClient, userId: number): Promise<User> {
 }
 
 async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData, operation = "ADD_MVR"): Promise<void> {
-  console.log(`Attempting to send audit log to Firehose: ${DELIVERY_STREAM}`);
+  console.log(`Sending audit log to Firehose: ${DELIVERY_STREAM}`);
   
   const payload = {
     drivers_license_number: userData.drivers_license_number,
@@ -482,16 +482,46 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
   console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
 
   try {
-    const response = await firehose.send(
-      new PutRecordCommand({
-        DeliveryStreamName: DELIVERY_STREAM,
-        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
-      })
-    );
-    console.log(`Firehose response:`, response);
+    const command = new PutRecordCommand({
+      DeliveryStreamName: DELIVERY_STREAM,
+      Record: { 
+        Data: Buffer.from(JSON.stringify(payload) + "\n", 'utf-8')
+      }
+    });
+    
+    const response = await firehose.send(command);
+    console.log(`Firehose response:`, JSON.stringify(response, null, 2));
   } catch (error) {
     console.error(`Firehose error:`, error);
-    throw error;
+  }
+}
+
+async function sendFailureAuditLog(driversLicense: string, company_id: string, error: Error): Promise<void> {
+  console.log(`Sending failure audit log to Firehose: ${DELIVERY_STREAM}`);
+  
+  const failurePayload = {
+    drivers_license_number: driversLicense,
+    company_id: company_id,
+    timestamp: new Date().toISOString(),
+    operation: "CREATE_MVR_FAILED",
+    function_name: 'add-mvr-lambda',
+    success: false,
+    error_message: error.message,
+    operation_category: 'WRITE' as const
+  };
+  
+  try {
+    const command = new PutRecordCommand({
+      DeliveryStreamName: DELIVERY_STREAM,
+      Record: { 
+        Data: Buffer.from(JSON.stringify(failurePayload) + "\n", 'utf-8')
+      }
+    });
+    
+    await firehose.send(command);
+    console.log("Failure audit log sent successfully");
+  } catch (auditError) {
+    console.error("Failed to send failure audit log:", auditError);
   }
 }
 
@@ -512,6 +542,9 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     mvrData.date_uploaded = new Date();
     company_id = body.company_id;
     permissible_purpose = body.permissible_purpose;
+    price_paid = body.price_paid;
+    redisclosure_authorization = body.redisclosure_authorization;
+    storage_limitations = body.storage_limitations;
     
     if (!mvrData.drivers_license_number) {
       throw new Error('Required fields missing');
@@ -550,6 +583,13 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
   const pool: Pool = await createDatabasePool();
   const client: PoolClient = await pool.connect();
   
+  let userData: User | null = null;
+  let mvrId: number | null = null;
+  let finalUserId: number | null = null;
+  let operationType = "";
+  let operationSuccess = false;
+  let responseToReturn: APIGatewayProxyResult;
+  
   try {
     await client.query('BEGIN');
   
@@ -557,21 +597,25 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
 
     if (userId && hasRecentMvr) {
       await client.query('COMMIT');
-      return {
+      
+      responseToReturn = {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
       };
+      
+      return responseToReturn;
     }
 
-    const mvrId = await createMvrRecord(client, mvrData);
+    mvrId = await createMvrRecord(client, mvrData);
     
-    let finalUserId: number;
     if (userId) {
       await updateUserMvrId(client, userId, mvrId);
       finalUserId = userId;
+      operationType = "UPDATE_MVR";
     } else {
       finalUserId = await createUser(client, mvrData, mvrId);
+      operationType = "CREATE_MVR";
     }
 
     await addDriverLicenseInfo(client, mvrData, mvrId);
@@ -581,17 +625,11 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     await addTrafficCrimes(client, mvrData.crimes || [], mvrId);
     
     await client.query('COMMIT');
+    operationSuccess = true;
 
-    const userData = await getUserData(client, finalUserId);
+    userData = await getUserData(client, finalUserId);
     
-    try {
-      await sendAuditLog(userData, company_id, mvrData, userId ? "UPDATE_MVR" : "CREATE_MVR");
-      console.log("Audit log sent successfully");
-    } catch (auditError) {
-      console.error("Audit log failed:", auditError);
-    }
-    
-    return {
+    responseToReturn = {
       statusCode: 201,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
@@ -605,30 +643,8 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     await client.query('ROLLBACK');
     console.error('Error processing MVR:', error);
     
-    try {
-      const failurePayload = {
-        drivers_license_number: mvrData.drivers_license_number,
-        company_id: company_id,
-        timestamp: new Date().toISOString(),
-        operation: "CREATE_MVR_FAILED",
-        function_name: 'add-mvr-lambda',
-        success: false,
-        error_message: error instanceof Error ? error.message : 'Unknown error',
-        operation_category: 'WRITE' as const
-      };
-      
-      await firehose.send(
-        new PutRecordCommand({
-          DeliveryStreamName: DELIVERY_STREAM,
-          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n") }
-        })
-      );
-    } catch (auditError) {
-      console.error("Failed to send failure audit log:", auditError);
-    }
-    
     const err = ensureError(error);
-    return {
+    responseToReturn = {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ error: err.message || 'Internal server error' })
@@ -637,6 +653,18 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
   } finally {
     client.release();
   }
+  
+  if (operationSuccess && userData && company_id) {
+    sendAuditLog(userData, company_id, mvrData, operationType).catch(error => {
+      console.error("Audit log failed (fire-and-forget):", error);
+    });
+  } else if (!operationSuccess && mvrData.drivers_license_number && company_id) {
+    sendFailureAuditLog(mvrData.drivers_license_number, company_id, new Error('Operation failed')).catch(error => {
+      console.error("Failure audit log failed (fire-and-forget):", error);
+    });
+  }
+  
+  return responseToReturn;
 };
 
 // 'EMPLOYMENT', 
