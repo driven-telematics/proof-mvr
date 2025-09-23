@@ -168,7 +168,6 @@ Resources:
       CodeUri: add-mvr/
       Handler: app.lambdaHandler
       Runtime: nodejs22.x
-      MemorySize: 1024
       Architectures:
         - x86_64
       VpcConfig:
