@@ -287,6 +287,10 @@ export const lambdaHandler = async (
         mvr.time_frame,
         mvr.is_certified,
         mvr.total_points,
+        mvr.consent,
+        mvr.price_paid,
+        mvr.redisclosure_authorization,
+        mvr.storage_limitations,
         -- License Info
         dli.license_class,
         dli.issue_date,
@@ -459,4 +463,3 @@ function ensureError(value: unknown): Error {
   const error = new Error(`This value was thrown as is, not through an Error: ${stringified}`)
   return error
 }
-

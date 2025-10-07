@@ -496,6 +496,7 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
   }
 }
 
+// try awaits on the lines that send this. See what it does to performance, then go from there
 async function sendFailureAuditLog(driversLicense: string, company_id: string, error: Error): Promise<void> {
   console.log(`Sending failure audit log to Firehose: ${DELIVERY_STREAM}`);
   
@@ -655,11 +656,11 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
   }
   
   if (operationSuccess && userData && company_id) {
-    sendAuditLog(userData, company_id, mvrData, operationType).catch(error => {
+    await sendAuditLog(userData, company_id, mvrData, operationType).catch(error => {
       console.error("Audit log failed (fire-and-forget):", error);
     });
   } else if (!operationSuccess && mvrData.drivers_license_number && company_id) {
-    sendFailureAuditLog(mvrData.drivers_license_number, company_id, new Error('Operation failed')).catch(error => {
+    await sendFailureAuditLog(mvrData.drivers_license_number, company_id, new Error('Operation failed')).catch(error => {
       console.error("Failure audit log failed (fire-and-forget):", error);
     });
   }
