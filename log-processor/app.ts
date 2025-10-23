@@ -128,6 +128,7 @@ export const lambdaHandler: FirehoseTransformationHandler =
   async (event: FirehoseTransformationEvent): Promise<FirehoseTransformationResult> => {
     const output: FirehoseTransformationResultRecord[] = [];
     
+    console.log("attempting to run lambdahandler in log-processor function");
     for (const r of event.records) {
       try {
         const raw = JSON.parse(Buffer.from(r.data, "base64").toString("utf8"));
@@ -154,6 +155,7 @@ export const lambdaHandler: FirehoseTransformationHandler =
             },
           },
         };
+
 
         console.log(`Record ${r.recordId}: company_id=${processed.company_id}, action=${action}, year=${dateParts.year}, month=${dateParts.month}, day=${dateParts.day}`);
 

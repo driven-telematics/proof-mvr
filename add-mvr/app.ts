@@ -9,7 +9,7 @@ import {
 } from "@aws-sdk/client-firehose";
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
-const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
+const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "CompanyAuditStream";
 let globalPool: Pool | null = null;
 
 // TODO: 
@@ -488,7 +488,8 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
         Data: Buffer.from(JSON.stringify(payload) + "\n", 'utf-8')
       }
     });
-    
+    console.log("Sending command to firehose:  " + command);
+
     const response = await firehose.send(command);
     console.log(`Firehose response:`, JSON.stringify(response, null, 2));
   } catch (error) {
@@ -596,15 +597,23 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
   
     const { userId, hasRecentMvr } = await checkExistingUser(client, mvrData.drivers_license_number);
 
+    // Can't return here because audit log won't be sent
     if (userId && hasRecentMvr) {
       await client.query('COMMIT');
-      
+
+      userData = await getUserData(client, userId);
+      operationType = "DUPLICATE_MVR_ATTEMPT";
+      operationSuccess = true;
+
       responseToReturn = {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: 'MVR uploaded less than 30 days ago' })
       };
-      
+
+      // Send audit log before returning
+      await sendAuditLog(userData, company_id, mvrData, operationType);
+
       return responseToReturn;
     }
 
@@ -639,32 +648,36 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
         user_id: finalUserId
       })
     };
+
+    console.log("finished with addmvr functionality");
     
   } catch (error: unknown) {
     await client.query('ROLLBACK');
     console.error('Error processing MVR:', error);
-    
+
     const err = ensureError(error);
     responseToReturn = {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ error: err.message || 'Internal server error' })
     };
-    
+
+    // Send failure audit log
+    if (company_id) {
+      await sendFailureAuditLog(mvrData.drivers_license_number, company_id, err);
+    }
+
   } finally {
     client.release();
   }
-  
+
+  console.log("Attempting to run sendAuditLog function");
+
   if (operationSuccess && userData && company_id) {
-    await sendAuditLog(userData, company_id, mvrData, operationType).catch(error => {
-      console.error("Audit log failed (fire-and-forget):", error);
-    });
-  } else if (!operationSuccess && mvrData.drivers_license_number && company_id) {
-    await sendFailureAuditLog(mvrData.drivers_license_number, company_id, new Error('Operation failed')).catch(error => {
-      console.error("Failure audit log failed (fire-and-forget):", error);
-    });
+    await sendAuditLog(userData, company_id, mvrData, operationType);
+    console.log("successfully ran the sendAuditLog method");
   }
-  
+
   return responseToReturn;
 };
 

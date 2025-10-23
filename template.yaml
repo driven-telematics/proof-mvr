@@ -15,7 +15,7 @@ Globals:
     Environment:
       Variables:
         S3_AUDIT_BUCKET: mvr-audit-logs
-        AUDIT_FIREHOSE_NAME: MVR_AUDIT_STREAM
+        AUDIT_FIREHOSE_NAME: CompanyAuditStream
 
 Resources:
   MVRAuditLogGroup:
@@ -49,10 +49,87 @@ Resources:
                   - s3:PutObject
                 Resource:
                   - arn:aws:s3:::mvr-audit-logs
+                  - arn:aws:s3:::mvr-audit-logs/*
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt LogProcessorFunction.Arn
+
+  CompanyAuditFirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: CompanyAuditStream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: arn:aws:s3:::mvr-audit-logs
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        Prefix: companies/!{partitionKeyFromQuery:company_id}/!{partitionKeyFromQuery:action}/!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/!{partitionKeyFromQuery:day}/
+        ErrorOutputPrefix: error/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 60
+        CompressionFormat: ZIP
+        FileExtension: ""
+        CustomTimeZone: America/Chicago
+        DynamicPartitioningConfiguration:
+          Enabled: true
+          RetryOptions:
+            DurationInSeconds: 300
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt LogProcessorFunction.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: "3"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "1"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+            - Type: RecordDeAggregation
+              Parameters:
+                - ParameterName: SubRecordType
+                  ParameterValue: JSON
+            - Type: MetadataExtraction
+              Parameters:
+                - ParameterName: MetadataExtractionQuery
+                  ParameterValue: "{company_id:.company_id,action:.action,year:.year,month:.month,day:.day}"
+                - ParameterName: JsonParsingEngine
+                  ParameterValue: JQ-1.6
+            - Type: AppendDelimiterToRecord
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref MVRAuditLogGroup
+          LogStreamName: DestinationDelivery
+
+  FirehoseVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: vpc-0cafd5af66a6edbfd
+      ServiceName: !Sub 'com.amazonaws.us-east-1.kinesis-firehose'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - subnet-0bbaa5d7391f2f774
+        - subnet-0efb623070a90811d
+      SecurityGroupIds:
+        - !Ref FirehoseVPCEndpointSecurityGroup
+
+  FirehoseVPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Firehose VPC Endpoint
+      VpcId: vpc-0cafd5af66a6edbfd
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: sg-09b13c689ca54eb6e
+      Tags:
+        - Key: Name
+          Value: FirehoseVPCEndpoint
 
   SecretsManagerVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -141,7 +218,7 @@ Resources:
       FunctionName: !GetAtt LogProcessorFunction.Arn
       Action: lambda:InvokeFunction
       Principal: firehose.amazonaws.com
-      SourceArn: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+      SourceArn: 'arn:aws:firehose:us-east-1:619071327381:deliverystream/CompanyAuditStream'
 
   ApiGatewayAccount:
     Type: AWS::ApiGateway::Account
@@ -161,6 +238,19 @@ Resources:
           LoggingLevel: INFO
           DataTraceEnabled: true
           MetricsEnabled: true
+      Description: "Description added to add change which should create the resource policy again"
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*
+              Condition:
+                IpAddress:
+                  aws:SourceIp:
+                    - "128.62.106.187/32"
+                    - "128.62.52.3/32"
 
   AddMVRFunction:
     Type: AWS::Serverless::Function
@@ -186,11 +276,11 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
             - Effect: Allow
-              Action: 
+              Action:
                 -  secretsmanager:GetSecretValue
-              Resource: 
+              Resource:
                 - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         AddMVR:
@@ -231,11 +321,11 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
             - Effect: Allow
-              Action: 
+              Action:
                 -  secretsmanager:GetSecretValue
-              Resource: 
+              Resource:
                 - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         BatchAddMVR:
@@ -276,11 +366,11 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
             - Effect: Allow
-              Action: 
+              Action:
                 -  secretsmanager:GetSecretValue
-              Resource: 
+              Resource:
                 - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         GetMVR:
@@ -326,4 +416,4 @@ Outputs:
 
   MVRAuditFirehose:
     Description: Kinesis Data Firehose stream for MVR audit logs
-    Value: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+    Value: !GetAtt CompanyAuditFirehoseStream.Arn
