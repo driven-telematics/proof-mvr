@@ -53,7 +53,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
-                Resource: !GetAtt LogProcessorFunction.Arn
+                Resource:
+                  - !GetAtt LogProcessorFunction.Arn
+                  - !GetAtt IndividualLogProcessorFunction.Arn
 
   CompanyAuditFirehoseStream:
     Type: AWS::KinesisFirehose::DeliveryStream
@@ -103,6 +105,55 @@ Resources:
           Enabled: true
           LogGroupName: !Ref MVRAuditLogGroup
           LogStreamName: DestinationDelivery
+
+  IndividualAuditFirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: IndividualAuditStream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: arn:aws:s3:::mvr-audit-logs
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        Prefix: individuals/!{partitionKeyFromQuery:drivers_license_number}/!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/!{partitionKeyFromQuery:day}/!{partitionKeyFromQuery:action}/
+        ErrorOutputPrefix: error/individual/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 60
+        CompressionFormat: ZIP
+        FileExtension: ""
+        CustomTimeZone: America/Chicago
+        DynamicPartitioningConfiguration:
+          Enabled: true
+          RetryOptions:
+            DurationInSeconds: 300
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt IndividualLogProcessorFunction.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: "3"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "1"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+            - Type: RecordDeAggregation
+              Parameters:
+                - ParameterName: SubRecordType
+                  ParameterValue: JSON
+            - Type: MetadataExtraction
+              Parameters:
+                - ParameterName: MetadataExtractionQuery
+                  ParameterValue: "{drivers_license_number:.drivers_license_number,action:.action,year:.year,month:.month,day:.day}"
+                - ParameterName: JsonParsingEngine
+                  ParameterValue: JQ-1.6
+            - Type: AppendDelimiterToRecord
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref MVRAuditLogGroup
+          LogStreamName: IndividualDestinationDelivery
 
   FirehoseVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -161,10 +212,11 @@ Resources:
       Architectures:
         - x86_64
       Timeout: 300
-    Environment:
+      Environment:
         Variables:
           AUDIT_PROCESSOR_LAMBDA_NAME: !Ref IndividualLogProcessorFunction
-    Policies:
+          INDIVIDUAL_AUDIT_STREAM_NAME: IndividualAuditStream
+      Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
@@ -176,7 +228,7 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/Individual-Log-Processor
+              Resource: !Sub 'arn:aws:firehose:${AWS::Region}:${AWS::AccountId}:deliverystream/IndividualAuditStream'
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -218,7 +270,15 @@ Resources:
       FunctionName: !GetAtt LogProcessorFunction.Arn
       Action: lambda:InvokeFunction
       Principal: firehose.amazonaws.com
-      SourceArn: 'arn:aws:firehose:us-east-1:619071327381:deliverystream/CompanyAuditStream'
+      SourceArn: !GetAtt CompanyAuditFirehoseStream.Arn
+
+  IndividualLogProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IndividualLogProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: firehose.amazonaws.com
+      SourceArn: !GetAtt IndividualAuditFirehoseStream.Arn
 
   ApiGatewayAccount:
     Type: AWS::ApiGateway::Account
@@ -251,6 +311,8 @@ Resources:
                   aws:SourceIp:
                     - "128.62.106.187/32"
                     - "128.62.52.3/32"
+                    - "209.166.122.193/32"
+                    - "128.62.103.29/32"
 
   AddMVRFunction:
     Type: AWS::Serverless::Function

@@ -6,9 +6,14 @@ import {
   FirehoseClient,
   PutRecordCommand
 } from "@aws-sdk/client-firehose";
+import {
+  validateOrThrow,
+  schemas,
+  HttpError
+} from './validation';
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
-const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
+const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "CompanyAuditStream";
 let globalPool: Pool | null = null;
 
 
@@ -99,25 +104,83 @@ export const createDatabasePool = async (): Promise<Pool> => {
   }
 };
 
-async function sendAuditLog(userData: User, company_id: string): Promise<void> {
+async function sendAuditLog(userData: User, company_id: string, operation = "GET_MVR"): Promise<void> {
+  console.log(`Sending audit log to Firehose: ${DELIVERY_STREAM}`);
+
+  const now = new Date();
   const payload = {
     drivers_license_number: userData.drivers_license_number,
     mvr_id: userData.current_mvr_id,
     user_id: userData.id,
-    timestamp: new Date().toISOString(),
-    operation: "GET_MVR",           
-    issued_state_code: userData.issued_state_code,
     full_legal_name: userData.full_legal_name,
+    issued_state_code: userData.issued_state_code,
+
+    timestamp: now.toISOString(),
+    operation: operation,
     company_partition: company_id,
     company_id: company_id,
+    function_name: 'get-mvr-lambda',
+    success: true,
+    affected_records_count: 1,
+    operation_category: 'READ' as const,
+
+    action: operation,
+    year: now.getFullYear().toString(),
+    month: (now.getMonth() + 1).toString().padStart(2, '0'),
+    day: now.getDate().toString().padStart(2, '0')
   };
 
-  await firehose.send(
-    new PutRecordCommand({
+  console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
+
+  try {
+    const command = new PutRecordCommand({
       DeliveryStreamName: DELIVERY_STREAM,
-      Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
-    })
-  );
+      Record: {
+        Data: Buffer.from(JSON.stringify(payload) + "\n", 'utf-8')
+      }
+    });
+
+    const response = await firehose.send(command);
+    console.log(`Firehose response:`, JSON.stringify(response, null, 2));
+  } catch (error) {
+    console.error(`Firehose error:`, error);
+  }
+}
+
+async function sendFailureAuditLog(driversLicense: string, company_id: string, error: Error, operation = "GET_MVR_FAILED"): Promise<void> {
+  console.log(`Sending failure audit log to Firehose: ${DELIVERY_STREAM}`);
+
+  const now = new Date();
+  const failurePayload = {
+    drivers_license_number: driversLicense,
+    company_id: company_id,
+    timestamp: now.toISOString(),
+    operation: operation,
+    function_name: 'get-mvr-lambda',
+    success: false,
+    error_message: error.message,
+    operation_category: 'READ' as const,
+
+
+    action: operation,
+    year: now.getFullYear().toString(),
+    month: (now.getMonth() + 1).toString().padStart(2, '0'),
+    day: now.getDate().toString().padStart(2, '0')
+  };
+
+  try {
+    const command = new PutRecordCommand({
+      DeliveryStreamName: DELIVERY_STREAM,
+      Record: {
+        Data: Buffer.from(JSON.stringify(failurePayload) + "\n", 'utf-8')
+      }
+    });
+
+    await firehose.send(command);
+    console.log("Failure audit log sent successfully");
+  } catch (auditError) {
+    console.error("Failed to send failure audit log:", auditError);
+  }
 }
 
 export const lambdaHandler = async (
@@ -130,49 +193,27 @@ export const lambdaHandler = async (
   let consent: boolean;
 
   try {
-    if (!event.body) throw new Error("Missing request body");
+    if (!event.body) {
+      throw new HttpError("Missing request body", 400);
+    }
+
     const body = JSON.parse(event.body);
-    
+
+    validateOrThrow(body, schemas.getMvr, 400);
+
     drivers_license_number = body.drivers_license_number;
     company_id = body.company_id;
     permissible_purpose = body.permissible_purpose;
     days = body.days;
     consent = body.consent;
-    
-    if (!drivers_license_number) throw new Error("Missing drivers_license_number");
-    if (!company_id) throw new Error("Missing company_id");
-    if (!checkPermissiblePurpose(permissible_purpose || '')) {
-      throw new Error('Invalid permissible_purpose for MVR request');
-    }
-    
-    if (days === undefined || days === null) {
-      throw new Error('Days field is required');
-    }
-    if (typeof days !== 'number') {
-      throw new Error('Days field must be a number');
-    }
-    if (!Number.isInteger(days)) {
-      throw new Error('Days field must be an integer');
-    }
-    if (days < 0) {
-      throw new Error('Days field must be non-negative');
-    }
-    
-    if (consent !== true) {
-      return {
-        statusCode: 403,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: "Driver consent is required to access MVR records",
-        }),
-      };
-    }
-    
+
   } catch (error: unknown) {
     console.error("Input validation error:", error);
     const err = ensureError(error);
+    const statusCode = err instanceof HttpError ? err.statusCode : 400;
+
     return {
-      statusCode: 400,
+      statusCode,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         error: err.message || "Error validating request parameters",
@@ -426,6 +467,15 @@ export const lambdaHandler = async (
   } catch (error: unknown) {
     console.error("Error retrieving MVR record:", error);
     const err = ensureError(error);
+
+    if (company_id && drivers_license_number) {
+      setImmediate(() => {
+        sendFailureAuditLog(drivers_license_number, company_id, err).catch(auditErr =>
+          console.error("Failure audit log failed:", auditErr)
+        );
+      });
+    }
+
     return {
       statusCode: 500,
       headers: { "Content-Type": "application/json" },
@@ -439,18 +489,6 @@ export const lambdaHandler = async (
     }
   }
 };
-
-function checkPermissiblePurpose(purpose: string): boolean {
-  const permissiblePurposes = [
-    'EMPLOYMENT', 
-    'INSURANCE', 
-    'LEGAL', 
-    'GOVERNMENT',
-    'UNDERWRITING',
-    'FRAUD'
-  ];
-  return permissiblePurposes.includes(purpose);
-}
 
 function ensureError(value: unknown): Error {
   if (value instanceof Error) return value
