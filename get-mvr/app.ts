@@ -46,7 +46,7 @@ interface DatabaseConfigVariables {
   MVR_DB_PASSWORD?: string;
 }
 
-export const getSecretValue = async (
+const getSecretValue = async (
   secretName: string,
 ): Promise<DatabaseConfigVariables> => {
   if (!secretName) {
@@ -73,7 +73,7 @@ export const getSecretValue = async (
   }
 };
 
-export const createDatabasePool = async (): Promise<Pool> => {
+const createDatabasePool = async (): Promise<Pool> => {
   if (globalPool) {
     return globalPool;
   }

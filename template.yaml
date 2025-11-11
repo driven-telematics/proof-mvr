@@ -17,6 +17,12 @@ Globals:
         S3_AUDIT_BUCKET: mvr-audit-logs
         AUDIT_FIREHOSE_NAME: CompanyAuditStream
 
+Parameters:
+  WhitelistedIPs:
+    Type: CommaDelimitedList
+    Description: Comma-delimited list of IP addresses for the whitelist allow to access the API Gateway
+    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32"
+
 Resources:
   MVRAuditLogGroup:
     Type: AWS::Logs::LogGroup
@@ -71,7 +77,6 @@ Resources:
           SizeInMBs: 64
           IntervalInSeconds: 60
         CompressionFormat: ZIP
-        FileExtension: ""
         CustomTimeZone: America/Chicago
         DynamicPartitioningConfiguration:
           Enabled: true
@@ -120,7 +125,6 @@ Resources:
           SizeInMBs: 64
           IntervalInSeconds: 60
         CompressionFormat: ZIP
-        FileExtension: ""
         CustomTimeZone: America/Chicago
         DynamicPartitioningConfiguration:
           Enabled: true
@@ -308,11 +312,7 @@ Resources:
               Resource: execute-api:/*
               Condition:
                 IpAddress:
-                  aws:SourceIp:
-                    - "128.62.106.187/32"
-                    - "128.62.52.3/32"
-                    - "209.166.122.193/32"
-                    - "128.62.103.29/32"
+                  aws:SourceIp: !Ref WhitelistedIPs
 
   AddMVRFunction:
     Type: AWS::Serverless::Function

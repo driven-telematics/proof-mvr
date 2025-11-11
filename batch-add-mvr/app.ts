@@ -13,7 +13,6 @@ import { format, subDays } from "date-fns";
 import {
   validateOrThrow,
   schemas,
-  createErrorResponse,
   HttpError
 } from './validation';
 
@@ -52,7 +51,7 @@ interface User {
   current_mvr_id: number;
 }
 
-export interface MVRViolation {
+interface MVRViolation {
   violation_date: string;
   conviction_date?: string;
   location?: string;
@@ -61,28 +60,28 @@ export interface MVRViolation {
   description?: string;
 }
 
-export interface MVRWithdrawal {
+interface MVRWithdrawal {
   effective_date: string;
   eligibility_date?: string;
   action_type?: string;
   reason?: string;
 }
 
-export interface MVRAccident {
+interface MVRAccident {
   accident_date: string;
   location?: string;
   acd_code?: string;
   description?: string;
 }
 
-export interface MVRCrime {
+interface MVRCrime {
   crime_date: string;
   conviction_date?: string;
   offense_code?: string;
   description?: string;
 }
 
-export interface MVRData {
+interface MVRData {
   drivers_license_number: string;
   full_legal_name: string;
   birthdate: string;
@@ -125,9 +124,17 @@ export interface MVRData {
   crimes?: MVRCrime[];
 }
 
+enum BatchProcessResultType {
+  NEW = 'NEW',
+  UPDATED = 'UPDATED',
+  SKIPPED = 'SKIPPED',
+  ERROR = 'ERROR'
+}
+
 interface BatchProcessResult {
   success: boolean;
   message: string;
+  type: BatchProcessResultType;
   mvr_id?: number;
   user_id?: number;
   error?: string;
@@ -135,7 +142,7 @@ interface BatchProcessResult {
 }
 
 
-export const getSecretValue = async (
+const getSecretValue = async (
   secretName: string,
 ): Promise<DatabaseConfigVariables> => {
   if (!secretName) {
@@ -163,7 +170,7 @@ export const getSecretValue = async (
   }
 };
 
-export const createDatabasePool = async (): Promise<Pool> => {
+const createDatabasePool = async (): Promise<Pool> => {
   try {
     const secrets = await getSecretValue("mvr-global-environments");
     const poolConfig = {
@@ -272,9 +279,9 @@ async function sendBatchAuditLog(company_id: string, results: BatchProcessResult
       total_records: results.length,
       successful_records: results.filter(r => r.success).length,
       failed_records: results.filter(r => !r.success).length,
-      new_users: results.filter(r => r.success && r.message.includes("New user")).length,
-      updated_users: results.filter(r => r.success && r.message.includes("updated")).length,
-      skipped_records: results.filter(r => r.success && r.message.includes("less than 30 days")).length
+      new_users: results.filter(r => r.type === BatchProcessResultType.NEW).length,
+      updated_users: results.filter(r => r.type === BatchProcessResultType.UPDATED).length,
+      skipped_records: results.filter(r => r.type === BatchProcessResultType.SKIPPED).length
     },
 
     action: operation,
@@ -586,6 +593,7 @@ async function processSingleMvr(
       return {
         success: false,
         message: "Required fields missing",
+        type: BatchProcessResultType.ERROR,
         error: "Driver's license number is required",
         drivers_license_number: "unknown",
       };
@@ -600,6 +608,7 @@ async function processSingleMvr(
       return {
         success: true,
         message: "MVR uploaded less than 30 days ago",
+        type: BatchProcessResultType.SKIPPED,
         drivers_license_number: mvrData.drivers_license_number,
         user_id: userId,
       };
@@ -636,6 +645,7 @@ async function processSingleMvr(
       message: userId
         ? "User MVR updated successfully"
         : "New user and MVR created successfully",
+      type: userId ? BatchProcessResultType.UPDATED : BatchProcessResultType.NEW,
       mvr_id: mvrId,
       user_id: finalUserId,
       drivers_license_number: mvrData.drivers_license_number,
@@ -674,6 +684,7 @@ async function processSingleMvr(
     return {
       success: false,
       message: "Error processing MVR",
+      type: BatchProcessResultType.ERROR,
       error: err.message || "Unknown error",
       drivers_license_number: mvrData.drivers_license_number || "unknown",
     };
@@ -752,13 +763,13 @@ export const lambdaHandler = async (
     const totalRecords = results.length;
     const successCount = results.filter((r) => r.success).length;
     const newRecords = results.filter(
-      (r) => r.success && r.message.includes("New user"),
+      (r) => r.type === BatchProcessResultType.NEW,
     ).length;
     const updatedRecords = results.filter(
-      (r) => r.success && r.message.includes("updated"),
+      (r) => r.type === BatchProcessResultType.UPDATED,
     ).length;
     const skippedRecords = results.filter(
-      (r) => r.success && r.message.includes("less than 30 days"),
+      (r) => r.type === BatchProcessResultType.SKIPPED,
     ).length;
 
     return {

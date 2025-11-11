@@ -10,7 +10,6 @@ import {
 import {
   validateOrThrow,
   schemas,
-  createErrorResponse,
   HttpError
 } from './validation';
 
@@ -21,7 +20,7 @@ let globalPool: Pool | null = null;
 // TODO: 
 // Delete the MVR record and the corresponding data when a new one is put in place to replace it
 
-export interface MVRViolation {
+interface MVRViolation {
   violation_date: string;
   conviction_date?: string;
   location?: string;
@@ -30,28 +29,28 @@ export interface MVRViolation {
   description?: string;
 }
 
-export interface MVRWithdrawal {
+interface MVRWithdrawal {
   effective_date: string;
   eligibility_date?: string;
   action_type?: string;
   reason?: string;
 }
 
-export interface MVRAccident {
+interface MVRAccident {
   accident_date: string;
   location?: string;
   acd_code?: string;
   description?: string;
 }
 
-export interface MVRCrime {
+interface MVRCrime {
   crime_date: string;
   conviction_date?: string;
   offense_code?: string;
   description?: string;
 }
 
-export interface MVRData {
+interface MVRData {
   drivers_license_number: string;
   full_legal_name: string;
   birthdate: string;
@@ -125,7 +124,7 @@ interface User {
 
 const THIRTY_DAYS = 30;
 
-export const getSecretValue = async (secretName: string): Promise<DatabaseConfigVariables> => {
+const getSecretValue = async (secretName: string): Promise<DatabaseConfigVariables> => {
   if (!secretName) {
     throw new Error("Secret name is required");
   }
@@ -151,7 +150,7 @@ export const getSecretValue = async (secretName: string): Promise<DatabaseConfig
   }
 };
 
-export const createDatabasePool = async (): Promise<Pool> => {
+const createDatabasePool = async (): Promise<Pool> => {
   if (globalPool) {
     return globalPool;
   }
