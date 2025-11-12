@@ -11,7 +11,7 @@ interface ProcessedLogRecord {
   hour: string;
   operation: string;
   user_id?: string;
-  company_id: string; 
+  company_id: string;
   drivers_id?: string;
   success: boolean;
   function_name: string;
@@ -21,17 +21,17 @@ interface ProcessedLogRecord {
   operation_category: 'READ' | 'WRITE' | 'DELETE';
   raw_log: string;
   s3_partition: string;
-  year: string; 
+  year: string;
   month: string;
   day: string;
-  action: string; 
+  action: string;
 }
 
 // were logging who grabbed it, but we need who it was bought from. That is who needs to be audited not the retriever 
 // we need both but the one who put it in is more important 
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
-const DELIVERY_STREAM =  "Individual-Log-Processor";
+const DELIVERY_STREAM = process.env.INDIVIDUAL_AUDIT_STREAM_NAME || "IndividualAuditStream";
 
 
 async function sendAuditLog(logEntry: ProcessedLogRecord): Promise<void> {
@@ -70,16 +70,14 @@ function processLogEntry(logEntry: any): ProcessedLogRecord {
   const timestamp = logEntry.timestamp || new Date().toISOString();
   const dateParts = getDateParts(timestamp);
 
-
   let companyId = logEntry.company_id || logEntry.user_id || 'unknown';
   companyId = String(companyId).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
-  
+
   if (!companyId || companyId === '') {
     companyId = 'unknown';
   }
 
   console.log(`Processing log entry: original_company_id=${logEntry.company_id}, user_id=${logEntry.user_id}, final_company_id=${companyId}`);
-
 
   const companyPartition = generateCompanyS3Partition(
     companyId,
@@ -128,6 +126,7 @@ export const lambdaHandler: FirehoseTransformationHandler =
   async (event: FirehoseTransformationEvent): Promise<FirehoseTransformationResult> => {
     const output: FirehoseTransformationResultRecord[] = [];
     
+    console.log("attempting to run lambdahandler in log-processor function");
     for (const r of event.records) {
       try {
         const raw = JSON.parse(Buffer.from(r.data, "base64").toString("utf8"));
@@ -154,6 +153,7 @@ export const lambdaHandler: FirehoseTransformationHandler =
             },
           },
         };
+
 
         console.log(`Record ${r.recordId}: company_id=${processed.company_id}, action=${action}, year=${dateParts.year}, month=${dateParts.month}, day=${dateParts.day}`);
 

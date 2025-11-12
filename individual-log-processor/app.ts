@@ -41,25 +41,26 @@ interface PgAuditLogEntry {
   day?: string;
 }
 
-export const lambdaHandler: FirehoseTransformationHandler = 
+export const lambdaHandler: FirehoseTransformationHandler =
   async (event: FirehoseTransformationEvent): Promise<FirehoseTransformationResult> => {
     const output: FirehoseTransformationResultRecord[] = event.records.map(r => {
       try {
         const raw = JSON.parse(Buffer.from(r.data, "base64").toString("utf8"));
-       
-        if (!raw.s3_partition) {
-          throw new Error("Missing s3_partition in processed record");
+
+        if (!raw.drivers_license_number) {
+          throw new Error("Missing drivers_license_number in record");
         }
 
         const dateParts = getDateParts(raw.timestamp);
-        const action = raw.action 
+        const action = raw.action || raw.operation || 'UNKNOWN';
+
         const transformedRecord: FirehoseTransformationResultRecord = {
           recordId: r.recordId,
           result: "Ok",
           data: Buffer.from(JSON.stringify(raw) + "\n").toString("base64"),
           metadata: {
             partitionKeys: {
-              drivers_id: raw.drivers_id,
+              drivers_license_number: raw.drivers_license_number,
               action: action,
               year: dateParts.year,
               month: dateParts.month,
@@ -68,7 +69,7 @@ export const lambdaHandler: FirehoseTransformationHandler =
           },
         };
 
-        console.log(`Record ${r.recordId}: company_id=${raw.company_id}, action=${action}, year=${dateParts.year}, month=${dateParts.month}, day=${dateParts.day}`);
+        console.log(`Record ${r.recordId}: drivers_license_number=${raw.drivers_license_number}, action=${action}, year=${dateParts.year}, month=${dateParts.month}, day=${dateParts.day}`);
 
         return transformedRecord;
       } catch (err) {

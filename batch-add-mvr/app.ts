@@ -10,9 +10,14 @@ import {
   PutRecordCommand
 } from "@aws-sdk/client-firehose";
 import { format, subDays } from "date-fns";
+import {
+  validateOrThrow,
+  schemas,
+  HttpError
+} from './validation';
 
-const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us‑east‑1" });
-const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "MVRAuditFirehose";
+const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
+const DELIVERY_STREAM = process.env.AUDIT_FIREHOSE_NAME || "CompanyAuditStream";
 
 
 
@@ -46,7 +51,7 @@ interface User {
   current_mvr_id: number;
 }
 
-export interface MVRViolation {
+interface MVRViolation {
   violation_date: string;
   conviction_date?: string;
   location?: string;
@@ -55,28 +60,28 @@ export interface MVRViolation {
   description?: string;
 }
 
-export interface MVRWithdrawal {
+interface MVRWithdrawal {
   effective_date: string;
   eligibility_date?: string;
   action_type?: string;
   reason?: string;
 }
 
-export interface MVRAccident {
+interface MVRAccident {
   accident_date: string;
   location?: string;
   acd_code?: string;
   description?: string;
 }
 
-export interface MVRCrime {
+interface MVRCrime {
   crime_date: string;
   conviction_date?: string;
   offense_code?: string;
   description?: string;
 }
 
-export interface MVRData {
+interface MVRData {
   drivers_license_number: string;
   full_legal_name: string;
   birthdate: string;
@@ -119,9 +124,17 @@ export interface MVRData {
   crimes?: MVRCrime[];
 }
 
+enum BatchProcessResultType {
+  NEW = 'NEW',
+  UPDATED = 'UPDATED',
+  SKIPPED = 'SKIPPED',
+  ERROR = 'ERROR'
+}
+
 interface BatchProcessResult {
   success: boolean;
   message: string;
+  type: BatchProcessResultType;
   mvr_id?: number;
   user_id?: number;
   error?: string;
@@ -129,7 +142,7 @@ interface BatchProcessResult {
 }
 
 
-export const getSecretValue = async (
+const getSecretValue = async (
   secretName: string,
 ): Promise<DatabaseConfigVariables> => {
   if (!secretName) {
@@ -157,7 +170,7 @@ export const getSecretValue = async (
   }
 };
 
-export const createDatabasePool = async (): Promise<Pool> => {
+const createDatabasePool = async (): Promise<Pool> => {
   try {
     const secrets = await getSecretValue("mvr-global-environments");
     const poolConfig = {
@@ -202,14 +215,15 @@ async function getUserData(client: PoolClient, userId: number): Promise<User> {
 
 async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData, operation = "BATCH_CREATE_MVR"): Promise<void> {
   console.log(`Attempting to send audit log to Firehose: ${DELIVERY_STREAM}`);
-  
+
+  const now = new Date();
   const payload = {
     drivers_license_number: userData.drivers_license_number,
     mvr_id: userData.current_mvr_id,
     user_id: userData.id,
     full_legal_name: userData.full_legal_name,
     issued_state_code: userData.issued_state_code,
-    
+
     order_id: mvrData.order_id,
     order_date: mvrData.order_date,
     report_date: mvrData.report_date,
@@ -217,15 +231,20 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
     mvr_type: mvrData.mvr_type,
     is_certified: mvrData.is_certified,
     total_points: mvrData.total_points,
-    
-    timestamp: new Date().toISOString(),
+
+    timestamp: now.toISOString(),
     operation: operation,
     company_partition: company_id,
     company_id: company_id,
     function_name: 'batch-add-mvr-lambda',
     success: true,
     affected_records_count: 1,
-    operation_category: 'WRITE' as const
+    operation_category: 'WRITE' as const,
+
+    action: operation,
+    year: now.getFullYear().toString(),
+    month: (now.getMonth() + 1).toString().padStart(2, '0'),
+    day: now.getDate().toString().padStart(2, '0')
   };
 
   console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
@@ -234,7 +253,7 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
     const response = await firehose.send(
       new PutRecordCommand({
         DeliveryStreamName: DELIVERY_STREAM,
-        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
+        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n", 'utf-8') }
       })
     );
     console.log(`Firehose response:`, response);
@@ -246,9 +265,10 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
 
 async function sendBatchAuditLog(company_id: string, results: BatchProcessResult[], operation = "BATCH_PROCESS_COMPLETE"): Promise<void> {
   console.log(`Sending batch completion audit log to Firehose: ${DELIVERY_STREAM}`);
-  
+
+  const now = new Date();
   const payload = {
-    timestamp: new Date().toISOString(),
+    timestamp: now.toISOString(),
     operation: operation,
     company_id: company_id,
     function_name: 'batch-add-mvr-lambda',
@@ -259,17 +279,22 @@ async function sendBatchAuditLog(company_id: string, results: BatchProcessResult
       total_records: results.length,
       successful_records: results.filter(r => r.success).length,
       failed_records: results.filter(r => !r.success).length,
-      new_users: results.filter(r => r.success && r.message.includes("New user")).length,
-      updated_users: results.filter(r => r.success && r.message.includes("updated")).length,
-      skipped_records: results.filter(r => r.success && r.message.includes("less than 30 days")).length
-    }
+      new_users: results.filter(r => r.type === BatchProcessResultType.NEW).length,
+      updated_users: results.filter(r => r.type === BatchProcessResultType.UPDATED).length,
+      skipped_records: results.filter(r => r.type === BatchProcessResultType.SKIPPED).length
+    },
+
+    action: operation,
+    year: now.getFullYear().toString(),
+    month: (now.getMonth() + 1).toString().padStart(2, '0'),
+    day: now.getDate().toString().padStart(2, '0')
   };
 
   try {
     const response = await firehose.send(
       new PutRecordCommand({
         DeliveryStreamName: DELIVERY_STREAM,
-        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n") }
+        Record: { Data: Buffer.from(JSON.stringify(payload) + "\n", 'utf-8') }
       })
     );
     console.log(`Batch audit response:`, response);
@@ -568,6 +593,7 @@ async function processSingleMvr(
       return {
         success: false,
         message: "Required fields missing",
+        type: BatchProcessResultType.ERROR,
         error: "Driver's license number is required",
         drivers_license_number: "unknown",
       };
@@ -582,6 +608,7 @@ async function processSingleMvr(
       return {
         success: true,
         message: "MVR uploaded less than 30 days ago",
+        type: BatchProcessResultType.SKIPPED,
         drivers_license_number: mvrData.drivers_license_number,
         user_id: userId,
       };
@@ -618,6 +645,7 @@ async function processSingleMvr(
       message: userId
         ? "User MVR updated successfully"
         : "New user and MVR created successfully",
+      type: userId ? BatchProcessResultType.UPDATED : BatchProcessResultType.NEW,
       mvr_id: mvrId,
       user_id: finalUserId,
       drivers_license_number: mvrData.drivers_license_number,
@@ -626,21 +654,27 @@ async function processSingleMvr(
     const err = ensureError(error);
     
     try {
+      const now = new Date();
       const failurePayload = {
         drivers_license_number: mvrData.drivers_license_number,
         company_id: company_id,
-        timestamp: new Date().toISOString(),
+        timestamp: now.toISOString(),
         operation: "BATCH_CREATE_MVR_FAILED",
         function_name: 'batch-add-mvr-lambda',
         success: false,
         error_message: err.message,
-        operation_category: 'WRITE' as const
+        operation_category: 'WRITE' as const,
+
+        action: "BATCH_CREATE_MVR_FAILED",
+        year: now.getFullYear().toString(),
+        month: (now.getMonth() + 1).toString().padStart(2, '0'),
+        day: now.getDate().toString().padStart(2, '0')
       };
-      
+
       await firehose.send(
         new PutRecordCommand({
           DeliveryStreamName: DELIVERY_STREAM,
-          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n") }
+          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n", 'utf-8') }
         })
       );
     } catch (auditError) {
@@ -650,6 +684,7 @@ async function processSingleMvr(
     return {
       success: false,
       message: "Error processing MVR",
+      type: BatchProcessResultType.ERROR,
       error: err.message || "Unknown error",
       drivers_license_number: mvrData.drivers_license_number || "unknown",
     };
@@ -659,38 +694,42 @@ async function processSingleMvr(
 export const lambdaHandler = async (
   event: APIGatewayProxyEvent,
 ): Promise<APIGatewayProxyResult> => {
-  let company_id: string | undefined;
-  let permissible_purpose: string | undefined;
+  let company_id: string;
+  let permissible_purpose: string;
   let mvrDataArray: MVRData[] = [];
 
   try {
     if (!event.body) {
-      throw new Error("Missing request body");
+      throw new HttpError("Missing request body", 400);
     }
 
     const requestData = JSON.parse(event.body);
-    
+
+    validateOrThrow(requestData, schemas.batchAddMvr, 400);
+
     company_id = requestData.company_id;
     mvrDataArray = requestData.batch_mvrs;
     permissible_purpose = requestData.permissible_purpose;
 
-    if (!company_id) {
-      throw new Error("Company ID is required");
-    }
-
-    if (!Array.isArray(mvrDataArray) || mvrDataArray.length === 0) {
-      throw new Error("batch_mvrs must be a non-empty array");
-    }
-
-    if (!checkPermissiblePurpose(permissible_purpose || '')) {
-      throw new Error('Invalid purpose for MVR request');
+    for (let i = 0; i < mvrDataArray.length; i++) {
+      try {
+        validateOrThrow(mvrDataArray[i], schemas.addMvrData, 400);
+      } catch (error: unknown) {
+        const err = ensureError(error);
+        throw new HttpError(
+          `Validation failed for MVR at index ${i}: ${err.message}`,
+          400
+        );
+      }
     }
 
   } catch (error: unknown) {
     console.error('Input validation error:', error);
     const err = ensureError(error);
+    const statusCode = err instanceof HttpError ? err.statusCode : 400;
+
     return {
-      statusCode: 400,
+      statusCode,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ error: err.message || 'Invalid request data' })
     };
@@ -724,13 +763,13 @@ export const lambdaHandler = async (
     const totalRecords = results.length;
     const successCount = results.filter((r) => r.success).length;
     const newRecords = results.filter(
-      (r) => r.success && r.message.includes("New user"),
+      (r) => r.type === BatchProcessResultType.NEW,
     ).length;
     const updatedRecords = results.filter(
-      (r) => r.success && r.message.includes("updated"),
+      (r) => r.type === BatchProcessResultType.UPDATED,
     ).length;
     const skippedRecords = results.filter(
-      (r) => r.success && r.message.includes("less than 30 days"),
+      (r) => r.type === BatchProcessResultType.SKIPPED,
     ).length;
 
     return {
@@ -753,9 +792,10 @@ export const lambdaHandler = async (
     console.error("Error processing MVR batch:", error);
     
     try {
+      const now = new Date();
       const failurePayload = {
         company_id: company_id,
-        timestamp: new Date().toISOString(),
+        timestamp: now.toISOString(),
         operation: "BATCH_PROCESS_FAILED",
         function_name: 'batch-add-mvr-lambda',
         success: false,
@@ -766,13 +806,18 @@ export const lambdaHandler = async (
           total_records: results.length,
           successful_records: results.filter(r => r.success).length,
           failed_records: results.filter(r => !r.success).length
-        }
+        },
+
+        action: "BATCH_PROCESS_FAILED",
+        year: now.getFullYear().toString(),
+        month: (now.getMonth() + 1).toString().padStart(2, '0'),
+        day: now.getDate().toString().padStart(2, '0')
       };
-      
+
       await firehose.send(
         new PutRecordCommand({
           DeliveryStreamName: DELIVERY_STREAM,
-          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n") }
+          Record: { Data: Buffer.from(JSON.stringify(failurePayload) + "\n", 'utf-8') }
         })
       );
     } catch (auditError) {
@@ -792,18 +837,6 @@ export const lambdaHandler = async (
     client.release();
   }
 };
-
-function checkPermissiblePurpose(purpose: string): boolean {
-  const permissiblePurposes = [
-    'EMPLOYMENT', 
-    'INSURANCE', 
-    'LEGAL', 
-    'GOVERNMENT',
-    'UNDERWRITING',
-    'FRAUD'
-  ];
-  return permissiblePurposes.includes(purpose);
-}
 
 function ensureError(value: unknown): Error {
   if (value instanceof Error) return value

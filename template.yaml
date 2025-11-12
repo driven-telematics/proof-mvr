@@ -3,15 +3,25 @@ Transform: AWS::Serverless-2016-10-31
 Description: >
   mvr-sam-app with comprehensive logging and S3 streaming
 
+# add api key to sam template 
+
 Globals:
+  Api:
+    EndpointConfiguration: REGIONAL
   Function:
-    Timeout: 30
+    Timeout: 300
     LoggingConfig:
       LogFormat: JSON
     Environment:
       Variables:
         S3_AUDIT_BUCKET: mvr-audit-logs
-        AUDIT_FIREHOSE_NAME: MVR_AUDIT_STREAM
+        AUDIT_FIREHOSE_NAME: CompanyAuditStream
+
+Parameters:
+  WhitelistedIPs:
+    Type: CommaDelimitedList
+    Description: Comma-delimited list of IP addresses for the whitelist allow to access the API Gateway
+    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32"
 
 Resources:
   MVRAuditLogGroup:
@@ -45,10 +55,157 @@ Resources:
                   - s3:PutObject
                 Resource:
                   - arn:aws:s3:::mvr-audit-logs
+                  - arn:aws:s3:::mvr-audit-logs/*
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
-                Resource: !GetAtt LogProcessorFunction.Arn
+                Resource:
+                  - !GetAtt LogProcessorFunction.Arn
+                  - !GetAtt IndividualLogProcessorFunction.Arn
+
+  CompanyAuditFirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: CompanyAuditStream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: arn:aws:s3:::mvr-audit-logs
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        Prefix: companies/!{partitionKeyFromQuery:company_id}/!{partitionKeyFromQuery:action}/!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/!{partitionKeyFromQuery:day}/
+        ErrorOutputPrefix: error/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 60
+        CompressionFormat: ZIP
+        CustomTimeZone: America/Chicago
+        DynamicPartitioningConfiguration:
+          Enabled: true
+          RetryOptions:
+            DurationInSeconds: 300
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt LogProcessorFunction.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: "3"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "1"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+            - Type: RecordDeAggregation
+              Parameters:
+                - ParameterName: SubRecordType
+                  ParameterValue: JSON
+            - Type: MetadataExtraction
+              Parameters:
+                - ParameterName: MetadataExtractionQuery
+                  ParameterValue: "{company_id:.company_id,action:.action,year:.year,month:.month,day:.day}"
+                - ParameterName: JsonParsingEngine
+                  ParameterValue: JQ-1.6
+            - Type: AppendDelimiterToRecord
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref MVRAuditLogGroup
+          LogStreamName: DestinationDelivery
+
+  IndividualAuditFirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: IndividualAuditStream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: arn:aws:s3:::mvr-audit-logs
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        Prefix: individuals/!{partitionKeyFromQuery:drivers_license_number}/!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/!{partitionKeyFromQuery:day}/!{partitionKeyFromQuery:action}/
+        ErrorOutputPrefix: error/individual/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 60
+        CompressionFormat: ZIP
+        CustomTimeZone: America/Chicago
+        DynamicPartitioningConfiguration:
+          Enabled: true
+          RetryOptions:
+            DurationInSeconds: 300
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt IndividualLogProcessorFunction.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: "3"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "1"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+            - Type: RecordDeAggregation
+              Parameters:
+                - ParameterName: SubRecordType
+                  ParameterValue: JSON
+            - Type: MetadataExtraction
+              Parameters:
+                - ParameterName: MetadataExtractionQuery
+                  ParameterValue: "{drivers_license_number:.drivers_license_number,action:.action,year:.year,month:.month,day:.day}"
+                - ParameterName: JsonParsingEngine
+                  ParameterValue: JQ-1.6
+            - Type: AppendDelimiterToRecord
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref MVRAuditLogGroup
+          LogStreamName: IndividualDestinationDelivery
+
+  FirehoseVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: vpc-0cafd5af66a6edbfd
+      ServiceName: !Sub 'com.amazonaws.us-east-1.kinesis-firehose'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - subnet-0bbaa5d7391f2f774
+        - subnet-0efb623070a90811d
+      SecurityGroupIds:
+        - !Ref FirehoseVPCEndpointSecurityGroup
+
+  FirehoseVPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Firehose VPC Endpoint
+      VpcId: vpc-0cafd5af66a6edbfd
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: sg-09b13c689ca54eb6e
+      Tags:
+        - Key: Name
+          Value: FirehoseVPCEndpoint
+
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: vpc-0cafd5af66a6edbfd
+      ServiceName: !Sub "com.amazonaws.us-east-1.secretsmanager"
+      VpcEndpointType: Interface
+      SubnetIds:
+          - subnet-0bbaa5d7391f2f774
+          - subnet-0efb623070a90811d
+      SecurityGroupIds:
+          - sg-09b13c689ca54eb6e
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: '*'
+      PrivateDnsEnabled: true
 
   LogProcessorFunction:
     Type: AWS::Serverless::Function
@@ -59,10 +216,11 @@ Resources:
       Architectures:
         - x86_64
       Timeout: 300
-    Environment:
+      Environment:
         Variables:
           AUDIT_PROCESSOR_LAMBDA_NAME: !Ref IndividualLogProcessorFunction
-    Policies:
+          INDIVIDUAL_AUDIT_STREAM_NAME: IndividualAuditStream
+      Policies:
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
@@ -74,7 +232,7 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/Individual-Log-Processor
+              Resource: !Sub 'arn:aws:firehose:${AWS::Region}:${AWS::AccountId}:deliverystream/IndividualAuditStream'
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -116,7 +274,45 @@ Resources:
       FunctionName: !GetAtt LogProcessorFunction.Arn
       Action: lambda:InvokeFunction
       Principal: firehose.amazonaws.com
-      SourceArn: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+      SourceArn: !GetAtt CompanyAuditFirehoseStream.Arn
+
+  IndividualLogProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IndividualLogProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: firehose.amazonaws.com
+      SourceArn: !GetAtt IndividualAuditFirehoseStream.Arn
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: arn:aws:iam::619071327381:role/APIGatewayCloudWatchLogsRole
+
+  MVRAPIService:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      AccessLogSetting:
+        DestinationArn: arn:aws:logs:us-east-1:619071327381:log-group:api-gateway-access-logs:*
+        Format: '{ "timestamp": "$context.requestTime", "ip": "$context.identity.sourceIp", "apiKeyId": "$context.identity.apiKeyId", "apiKeyName": "$context.identity.apiKey", "httpMethod": "$context.httpMethod", "path": "$context.resourcePath", "status": "$context.status", "latency": "$context.requestTimeEpoch", "requestBodyMasked": "$util.escapeJavaScript($input.json(''$.nonSensitiveField''))", "context": "$context.requestId" }'
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+      Description: "Description added to add change which should create the resource policy again"
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*
+              Condition:
+                IpAddress:
+                  aws:SourceIp: !Ref WhitelistedIPs
 
   AddMVRFunction:
     Type: AWS::Serverless::Function
@@ -142,18 +338,21 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
             - Effect: Allow
-              Action: 
+              Action:
                 -  secretsmanager:GetSecretValue
-              Resource: 
+              Resource:
                 - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         AddMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /add-mvr
             Method: post
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -184,13 +383,21 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
+            - Effect: Allow
+              Action:
+                -  secretsmanager:GetSecretValue
+              Resource:
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         BatchAddMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /batch-add-mvr
             Method: post
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -221,13 +428,21 @@ Resources:
               Action:
                 - firehose:PutRecord
                 - firehose:PutRecordBatch
-              Resource: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+              Resource: !GetAtt CompanyAuditFirehoseStream.Arn
+            - Effect: Allow
+              Action:
+                -  secretsmanager:GetSecretValue
+              Resource:
+                - "arn:aws:secretsmanager:us-east-1:619071327381:secret:mvr-global-environments-j95x4J"
       Events:
         GetMVR:
           Type: Api
           Properties:
+            RestApiId: !Ref MVRAPIService
             Path: /get-mvr
             Method: get
+            Auth:
+              ApiKeyRequired: true 
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -253,18 +468,6 @@ Resources:
       AutoConfigurationEnabled: "true"
 
 Outputs:
-  AddMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for adding MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/add-mvr/"
-
-  BatchAddMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for batch adding MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/batch-add-mvr/"
-
-  GetMVRApi:
-    Description: API Gateway endpoint URL for Prod stage for getting an MVR function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/get-mvr/"
-
   MVRAuditBucket:
     Description: The audit bucket
     Value: mvr-audit-logs
@@ -275,4 +478,4 @@ Outputs:
 
   MVRAuditFirehose:
     Description: Kinesis Data Firehose stream for MVR audit logs
-    Value: arn:aws:firehose:us-east-1:619071327381:deliverystream/MVR_AUDIT_STREAM
+    Value: !GetAtt CompanyAuditFirehoseStream.Arn
