@@ -66,7 +66,7 @@ interface MVRData {
   zip?: number;
   phone_number?: number;
   email?: string;
-  
+
   claim_number?: string;
   order_id?: string;
   order_date?: string;
@@ -79,14 +79,19 @@ interface MVRData {
   time_frame?: string;
   is_certified?: boolean;
   total_points?: number;
-  
+
+  consent?: boolean;
+  price_paid?: number;
+  redisclosure_authorization?: boolean;
+  storage_limitations?: number;
+
   license_class?: string;
   issue_date?: string;
   expiration_date?: string;
   status?: string;
   restrictions?: string;
   date_uploaded?: Date;
-  
+
   violations?: MVRViolation[];
   withdrawals?: MVRWithdrawal[];
   accidents?: MVRAccident[];
@@ -234,14 +239,15 @@ async function checkExistingUser(client: PoolClient, driversLicense: string): Pr
   return { userId, currentMvrId, hasRecentMvr };
 }
 
-async function createMvrRecord(client: PoolClient, mvrData: MVRData): Promise<number> {
+async function createMvrRecord(client: PoolClient, mvrData: MVRData, company_id: string): Promise<number> {
   const query = `
     INSERT INTO mvr_records (
       claim_number, order_id, order_date, report_date,
       reference_number, system_use, mvr_type, state_code,
-      purpose, time_frame, is_certified, total_points, date_uploaded
+      purpose, time_frame, is_certified, total_points, date_uploaded, company_id,
+      consent, price_paid, redisclosure_authorization, storage_limitations
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16, $17)
     RETURNING id
   `;
 
@@ -257,7 +263,12 @@ async function createMvrRecord(client: PoolClient, mvrData: MVRData): Promise<nu
     mvrData.purpose || null,
     mvrData.time_frame || null,
     mvrData.is_certified || false,
-    mvrData.total_points || 0
+    mvrData.total_points || 0,
+    company_id,
+    mvrData.consent || false,
+    mvrData.price_paid || null,
+    mvrData.redisclosure_authorization || false,
+    mvrData.storage_limitations || 5
   ];
 
   const result = await client.query(query, params);
@@ -461,20 +472,6 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
 
   const now = new Date();
   const payload = {
-    drivers_license_number: userData.drivers_license_number,
-    mvr_id: userData.current_mvr_id,
-    user_id: userData.id,
-    full_legal_name: userData.full_legal_name,
-    issued_state_code: userData.issued_state_code,
-
-    order_id: mvrData.order_id,
-    order_date: mvrData.order_date,
-    report_date: mvrData.report_date,
-    state_code: mvrData.state_code,
-    mvr_type: mvrData.mvr_type,
-    is_certified: mvrData.is_certified,
-    total_points: mvrData.total_points,
-
     timestamp: now.toISOString(),
     operation: operation,
     company_partition: company_id,
@@ -483,11 +480,34 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
     success: true,
     affected_records_count: 1,
     operation_category: 'WRITE' as const,
-
     action: operation,
     year: now.getFullYear().toString(),
     month: (now.getMonth() + 1).toString().padStart(2, '0'),
-    day: now.getDate().toString().padStart(2, '0')
+    day: now.getDate().toString().padStart(2, '0'),
+
+    creator: {
+      company_id: company_id,
+      upload_timestamp: now.toISOString(),
+      operation_type: operation
+    },
+
+    drivers_license_number: userData.drivers_license_number,
+    mvr_id: userData.current_mvr_id,
+    user_id: userData.id,
+    full_legal_name: userData.full_legal_name,
+    issued_state_code: userData.issued_state_code,
+
+    seller: {
+      company_id: company_id
+    },
+
+    mvr_data: {
+      ...mvrData,
+      violations: mvrData.violations || [],
+      withdrawals: mvrData.withdrawals || [],
+      accidents: mvrData.accidents || [],
+      crimes: mvrData.crimes || []
+    }
   };
 
   console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
@@ -579,6 +599,11 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
     validateOrThrow(mvrData, schemas.addMvrData, 400);
     mvrData.date_uploaded = new Date();
 
+    mvrData.consent = body.consent;
+    mvrData.price_paid = price_paid;
+    mvrData.redisclosure_authorization = redisclosure_authorization;
+    mvrData.storage_limitations = storage_limitations;
+
   } catch (error: unknown) {
     const err = ensureError(error);
     const statusCode = err instanceof HttpError ? err.statusCode : 400;
@@ -623,8 +648,8 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
       return responseToReturn;
     }
 
-    mvrId = await createMvrRecord(client, mvrData);
-    
+    mvrId = await createMvrRecord(client, mvrData, company_id);
+
     if (userId) {
       await updateUserMvrId(client, userId, mvrId);
       finalUserId = userId;

@@ -46,6 +46,87 @@ interface DatabaseConfigVariables {
   MVR_DB_PASSWORD?: string;
 }
 
+interface MVRViolation {
+  violation_date: string;
+  conviction_date?: string;
+  location?: string;
+  points_assessed?: number;
+  violation_code?: string;
+  description?: string;
+}
+
+interface MVRWithdrawal {
+  effective_date: string;
+  eligibility_date?: string;
+  action_type?: string;
+  reason?: string;
+}
+
+interface MVRAccident {
+  accident_date: string;
+  location?: string;
+  acd_code?: string;
+  description?: string;
+}
+
+interface MVRCrime {
+  crime_date: string;
+  conviction_date?: string;
+  offense_code?: string;
+  description?: string;
+}
+
+interface MVRLicenseInfo {
+  license_class?: string;
+  issue_date?: string;
+  expiration_date?: string;
+  status?: string;
+  restrictions?: string;
+}
+
+interface MVRTransaction {
+  seller_id: string;
+  buyer_id: string;
+  state_code: string;
+}
+
+interface CompleteMVRRecord {
+  drivers_license_number: string;
+  full_legal_name: string;
+  birthdate: Date;
+  weight: string;
+  sex: string;
+  height: string;
+  hair_color: string;
+  eye_color: string;
+  medical_information: string;
+  address: string;
+  city: string;
+  issued_state_code: string;
+  zip: number;
+  phone_number: number;
+  email: string;
+  claim_number?: string;
+  order_id?: string;
+  order_date?: string;
+  report_date?: string;
+  reference_number?: string;
+  system_use?: string;
+  mvr_type?: string;
+  state_code: string;
+  purpose?: string;
+  time_frame?: string;
+  is_certified?: boolean;
+  total_points?: number;
+  date_uploaded?: Date;
+  licenseInfo: MVRLicenseInfo | null;
+  violations: MVRViolation[];
+  withdrawals: MVRWithdrawal[];
+  accidents: MVRAccident[];
+  crimes: MVRCrime[];
+  transaction: MVRTransaction | null;
+}
+
 const getSecretValue = async (
   secretName: string,
 ): Promise<DatabaseConfigVariables> => {
@@ -104,16 +185,17 @@ const createDatabasePool = async (): Promise<Pool> => {
   }
 };
 
-async function sendAuditLog(userData: User, company_id: string, operation = "GET_MVR"): Promise<void> {
+async function sendAuditLog(
+  userData: User,
+  mvrRecord: CompleteMVRRecord,
+  company_id: string,
+  stored_company_id: string,
+  operation = "GET_MVR"
+): Promise<void> {
   console.log(`Sending audit log to Firehose: ${DELIVERY_STREAM}`);
 
   const now = new Date();
   const payload = {
-    drivers_license_number: userData.drivers_license_number,
-    mvr_id: userData.current_mvr_id,
-    user_id: userData.id,
-    full_legal_name: userData.full_legal_name,
-    issued_state_code: userData.issued_state_code,
 
     timestamp: now.toISOString(),
     operation: operation,
@@ -123,11 +205,35 @@ async function sendAuditLog(userData: User, company_id: string, operation = "GET
     success: true,
     affected_records_count: 1,
     operation_category: 'READ' as const,
-
     action: operation,
     year: now.getFullYear().toString(),
     month: (now.getMonth() + 1).toString().padStart(2, '0'),
-    day: now.getDate().toString().padStart(2, '0')
+    day: now.getDate().toString().padStart(2, '0'),
+
+
+    accessor: {
+      company_id: company_id,
+      access_timestamp: now.toISOString()
+    },
+
+
+    drivers_license_number: userData.drivers_license_number,
+    mvr_id: userData.current_mvr_id,
+    user_id: userData.id,
+    full_legal_name: userData.full_legal_name,
+    issued_state_code: userData.issued_state_code,
+
+
+    seller: mvrRecord.transaction ? {
+      seller_id: mvrRecord.transaction.seller_id,
+      buyer_id: mvrRecord.transaction.buyer_id,
+      transaction_state: mvrRecord.transaction.state_code,
+      company_id: stored_company_id
+    } : {
+      company_id: stored_company_id
+    },
+
+    mvr_data: mvrRecord
   };
 
   console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
@@ -297,7 +403,7 @@ export const lambdaHandler = async (
     }
     
     const optimizedQuery = `
-      SELECT 
+      SELECT
         u.id,
         u.drivers_license_number,
         u.full_legal_name,
@@ -332,6 +438,7 @@ export const lambdaHandler = async (
         mvr.price_paid,
         mvr.redisclosure_authorization,
         mvr.storage_limitations,
+        mvr.company_id,
         -- License Info
         dli.license_class,
         dli.issue_date,
@@ -405,6 +512,9 @@ export const lambdaHandler = async (
 
     userData = mainResult.rows[0];
 
+
+    const stored_company_id = userData.company_id;
+
     const mvrRecord = {
       drivers_license_number: userData.drivers_license_number,
       full_legal_name: userData.full_legal_name,
@@ -434,6 +544,10 @@ export const lambdaHandler = async (
       is_certified: userData.is_certified,
       total_points: userData.total_points,
       date_uploaded: userData.date_uploaded,
+      consent: userData.consent,
+      price_paid: userData.price_paid,
+      redisclosure_authorization: userData.redisclosure_authorization,
+      storage_limitations: userData.storage_limitations,
       licenseInfo: userData.license_class ? {
         license_class: userData.license_class,
         issue_date: userData.issue_date,
@@ -458,9 +572,12 @@ export const lambdaHandler = async (
       body: JSON.stringify(mvrRecord),
     };
 
-    setImmediate(() => {
-      sendAuditLog(userData, company_id).catch(err => console.error("Firehose log failed:", err));
-    });
+    try {
+      await sendAuditLog(userData, mvrRecord, company_id, stored_company_id, "GET_MVR");
+      console.log("Audit log sent successfully");
+    } catch (err) {
+      console.error("Firehose log failed:", err);
+    }
 
     return response;
     
@@ -469,11 +586,12 @@ export const lambdaHandler = async (
     const err = ensureError(error);
 
     if (company_id && drivers_license_number) {
-      setImmediate(() => {
-        sendFailureAuditLog(drivers_license_number, company_id, err).catch(auditErr =>
-          console.error("Failure audit log failed:", auditErr)
-        );
-      });
+      try {
+        await sendFailureAuditLog(drivers_license_number, company_id, err);
+        console.log("Failure audit log sent successfully");
+      } catch (auditErr) {
+        console.error("Failure audit log failed:", auditErr);
+      }
     }
 
     return {
