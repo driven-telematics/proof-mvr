@@ -21,7 +21,7 @@ Parameters:
   WhitelistedIPs:
     Type: CommaDelimitedList
     Description: Comma-delimited list of IP addresses for the whitelist allow to access the API Gateway
-    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32,128.62.49.240/32,209.166.122.210/32"
+    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32,128.62.49.240/32,209.166.122.210/32,128.62.171.160/32"
 
 Resources:
   MVRAuditLogGroup:
@@ -29,6 +29,104 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/mvr-audit-group"
       RetentionInDays: 30
+
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "aws-waf-logs-mvr-api-${AWS::StackName}"
+      RetentionInDays: 30
+
+  WAFIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: MVRWhitelistedIPs
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses: !Ref WhitelistedIPs
+      Description: Whitelisted IP addresses for MVR API access
+
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: MVRAPIWebACL
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: BlockNonWhitelistedIPs
+          Priority: 0
+          Statement:
+            NotStatement:
+              Statement:
+                IPSetReferenceStatement:
+                  Arn: !GetAtt WAFIPSet.Arn
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: BlockNonWhitelistedIPs
+
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules:
+                - Name: NoUserAgent_HEADER
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: MVRAPIWebACL
+
+
+  WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${MVRAPIService}/stages/Prod"
+      WebACLArn: !GetAtt WAFWebACL.Arn
+
+
+  WAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WAFWebACL.Arn
+      LogDestinationConfigs:
+        - !GetAtt WAFLogGroup.Arn
 
   FirehoseDeliveryRole:
     Type: AWS::IAM::Role
@@ -570,3 +668,15 @@ Outputs:
   MVRAuditFirehose:
     Description: Kinesis Data Firehose stream for MVR audit logs
     Value: !GetAtt CompanyAuditFirehoseStream.Arn
+
+  WAFWebACLArn:
+    Description: ARN of the WAF Web ACL protecting the API Gateway
+    Value: !GetAtt WAFWebACL.Arn
+
+  WAFWebACLId:
+    Description: ID of the WAF Web ACL
+    Value: !GetAtt WAFWebACL.Id
+
+  WAFLogGroup:
+    Description: CloudWatch Log Group for WAF logs
+    Value: !Ref WAFLogGroup
