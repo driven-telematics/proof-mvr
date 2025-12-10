@@ -20,7 +20,7 @@ s3_prefix = "mvr-sam-app"
 region = "us-east-1"
 disable_rollback = true
 image_repositories = []
-parameter_overrides = "WhitelistedIPs=\"128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32\""
+parameter_overrides = "WhitelistedIPs=\"128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32,128.62.49.240/32,209.166.122.210/32,128.62.171.160/32\""
 
 [default.package.parameters]
 resolve_s3 = true

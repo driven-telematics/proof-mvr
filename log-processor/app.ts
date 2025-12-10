@@ -5,6 +5,25 @@ import {
   PutRecordCommand
 } from "@aws-sdk/client-firehose";
 
+interface AccessorInfo {
+  company_id: string;
+  user_id: string;
+  access_timestamp: string;
+}
+
+interface CreatorInfo {
+  company_id: string;
+  upload_timestamp: string;
+  operation_type: string;
+}
+
+interface SellerInfo {
+  seller_id: string;
+  buyer_id: string;
+  transaction_state: string;
+  company_id?: string;
+}
+
 interface ProcessedLogRecord {
   timestamp: string;
   date: string;
@@ -25,10 +44,17 @@ interface ProcessedLogRecord {
   month: string;
   day: string;
   action: string;
+
+  
+  accessor?: AccessorInfo;     
+  creator?: CreatorInfo;        
+  seller?: SellerInfo | null;    
+  mvr_data?: any;                
+  mvr_id?: number;               
+  full_legal_name?: string;      
+  issued_state_code?: string;    
 }
 
-// were logging who grabbed it, but we need who it was bought from. That is who needs to be audited not the retriever 
-// we need both but the one who put it in is more important 
 
 const firehose = new FirehoseClient({ region: process.env.AWS_REGION || "us-east-1" });
 const DELIVERY_STREAM = process.env.INDIVIDUAL_AUDIT_STREAM_NAME || "IndividualAuditStream";
@@ -107,6 +133,15 @@ function processLogEntry(logEntry: any): ProcessedLogRecord {
     action: logEntry.operation || 'unknown',
     s3_partition: companyPartition,
     raw_log: JSON.stringify(logEntry),
+
+
+    accessor: logEntry.accessor,
+    creator: logEntry.creator,
+    seller: logEntry.seller,
+    mvr_data: logEntry.mvr_data,
+    mvr_id: logEntry.mvr_id,
+    full_legal_name: logEntry.full_legal_name,
+    issued_state_code: logEntry.issued_state_code
   };
 
   return processedRecord;
@@ -157,10 +192,16 @@ export const lambdaHandler: FirehoseTransformationHandler =
 
         console.log(`Record ${r.recordId}: company_id=${processed.company_id}, action=${action}, year=${dateParts.year}, month=${dateParts.month}, day=${dateParts.day}`);
 
-        try {
-          await sendAuditLog(processed);
-        } catch (err) {
-          console.error("Firehose log failed:", err);
+        // Only send to IndividualAuditStream if record has drivers_license_number
+        if (processed.drivers_license_number) {
+          try {
+            await sendAuditLog(processed);
+            console.log(`Sent record to IndividualAuditStream for driver: ${processed.drivers_license_number}`);
+          } catch (err) {
+            console.error("Firehose log failed:", err);
+          }
+        } else {
+          console.log(`Skipping IndividualAuditStream - no drivers_license_number in record`);
         }
 
         output.push(transformedRecord);

@@ -111,6 +111,11 @@ interface MVRData {
   is_certified?: boolean;
   total_points?: number;
 
+  consent?: boolean;
+  price_paid?: number;
+  redisclosure_authorization?: boolean;
+  storage_limitations?: number;
+
   license_class?: string;
   issue_date?: string;
   expiration_date?: string;
@@ -218,19 +223,6 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
 
   const now = new Date();
   const payload = {
-    drivers_license_number: userData.drivers_license_number,
-    mvr_id: userData.current_mvr_id,
-    user_id: userData.id,
-    full_legal_name: userData.full_legal_name,
-    issued_state_code: userData.issued_state_code,
-
-    order_id: mvrData.order_id,
-    order_date: mvrData.order_date,
-    report_date: mvrData.report_date,
-    state_code: mvrData.state_code,
-    mvr_type: mvrData.mvr_type,
-    is_certified: mvrData.is_certified,
-    total_points: mvrData.total_points,
 
     timestamp: now.toISOString(),
     operation: operation,
@@ -240,11 +232,39 @@ async function sendAuditLog(userData: User, company_id: string, mvrData: MVRData
     success: true,
     affected_records_count: 1,
     operation_category: 'WRITE' as const,
-
     action: operation,
     year: now.getFullYear().toString(),
     month: (now.getMonth() + 1).toString().padStart(2, '0'),
-    day: now.getDate().toString().padStart(2, '0')
+    day: now.getDate().toString().padStart(2, '0'),
+
+
+    creator: {
+      company_id: company_id,
+      upload_timestamp: now.toISOString(),
+      operation_type: operation
+    },
+
+
+    drivers_license_number: userData.drivers_license_number,
+    mvr_id: userData.current_mvr_id,
+    user_id: userData.id,
+    full_legal_name: userData.full_legal_name,
+    issued_state_code: userData.issued_state_code,
+
+
+    seller: {
+      company_id: company_id
+    },
+
+
+    mvr_data: {
+      ...mvrData,
+
+      violations: mvrData.violations || [],
+      withdrawals: mvrData.withdrawals || [],
+      accidents: mvrData.accidents || [],
+      crimes: mvrData.crimes || []
+    }
   };
 
   console.log(`Audit payload:`, JSON.stringify(payload, null, 2));
@@ -348,14 +368,16 @@ async function checkExistingUser(
 async function createMvrRecord(
   client: PoolClient,
   mvrData: MVRData,
+  company_id: string,
 ): Promise<number> {
   const query = `
     INSERT INTO mvr_records (
-      claim_number, order_id, order_date, report_date, 
-      reference_number, system_use, mvr_type, state_code, 
-      purpose, time_frame, is_certified, total_points, date_uploaded
-    ) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      claim_number, order_id, order_date, report_date,
+      reference_number, system_use, mvr_type, state_code,
+      purpose, time_frame, is_certified, total_points, date_uploaded, company_id,
+      consent, price_paid, redisclosure_authorization, storage_limitations
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
     RETURNING id
   `;
 
@@ -375,6 +397,11 @@ async function createMvrRecord(
     mvrData.is_certified || false,
     mvrData.total_points || 0,
     mvrData.date_uploaded ? mvrData.date_uploaded : new Date(),
+    company_id,
+    mvrData.consent || false,
+    mvrData.price_paid || null,
+    mvrData.redisclosure_authorization || false,
+    mvrData.storage_limitations || 5,
   ];
 
   const result = await client.query(query, params);
@@ -614,7 +641,7 @@ async function processSingleMvr(
       };
     }
 
-    const mvrId = await createMvrRecord(client, mvrData);
+    const mvrId = await createMvrRecord(client, mvrData, company_id);
 
     let finalUserId: number;
     if (userId) {

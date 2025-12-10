@@ -21,7 +21,7 @@ Parameters:
   WhitelistedIPs:
     Type: CommaDelimitedList
     Description: Comma-delimited list of IP addresses for the whitelist allow to access the API Gateway
-    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32"
+    Default: "128.62.106.187/32,128.62.52.3/32,209.166.122.193/32,128.62.103.29/32,128.62.37.138/32,128.62.49.240/32,209.166.122.210/32,128.62.171.160/32"
 
 Resources:
   MVRAuditLogGroup:
@@ -29,6 +29,104 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/mvr-audit-group"
       RetentionInDays: 30
+
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "aws-waf-logs-mvr-api-${AWS::StackName}"
+      RetentionInDays: 30
+
+  WAFIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: MVRWhitelistedIPs
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses: !Ref WhitelistedIPs
+      Description: Whitelisted IP addresses for MVR API access
+
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: MVRAPIWebACL
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: BlockNonWhitelistedIPs
+          Priority: 0
+          Statement:
+            NotStatement:
+              Statement:
+                IPSetReferenceStatement:
+                  Arn: !GetAtt WAFIPSet.Arn
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: BlockNonWhitelistedIPs
+
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules:
+                - Name: NoUserAgent_HEADER
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: MVRAPIWebACL
+
+
+  WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${MVRAPIService}/stages/Prod"
+      WebACLArn: !GetAtt WAFWebACL.Arn
+
+
+  WAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WAFWebACL.Arn
+      LogDestinationConfigs:
+        - !GetAtt WAFLogGroup.Arn
 
   FirehoseDeliveryRole:
     Type: AWS::IAM::Role
@@ -62,6 +160,7 @@ Resources:
                 Resource:
                   - !GetAtt LogProcessorFunction.Arn
                   - !GetAtt IndividualLogProcessorFunction.Arn
+                  - !GetAtt MirroringProcessorFunction.Arn
 
   CompanyAuditFirehoseStream:
     Type: AWS::KinesisFirehose::DeliveryStream
@@ -159,6 +258,54 @@ Resources:
           LogGroupName: !Ref MVRAuditLogGroup
           LogStreamName: IndividualDestinationDelivery
 
+  MirroringAuditFirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: MirroringAuditStream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: arn:aws:s3:::mvr-audit-logs
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        Prefix: companies/!{partitionKeyFromQuery:company_id}/MVR-RETRIEVED/!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/!{partitionKeyFromQuery:day}/
+        ErrorOutputPrefix: error/mirroring/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 60
+        CompressionFormat: ZIP
+        CustomTimeZone: America/Chicago
+        DynamicPartitioningConfiguration:
+          Enabled: true
+          RetryOptions:
+            DurationInSeconds: 300
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt MirroringProcessorFunction.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: "3"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "1"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+            - Type: RecordDeAggregation
+              Parameters:
+                - ParameterName: SubRecordType
+                  ParameterValue: JSON
+            - Type: MetadataExtraction
+              Parameters:
+                - ParameterName: MetadataExtractionQuery
+                  ParameterValue: "{company_id:.target_company_id,year:.year,month:.month,day:.day}"
+                - ParameterName: JsonParsingEngine
+                  ParameterValue: JQ-1.6
+            - Type: AppendDelimiterToRecord
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref MVRAuditLogGroup
+          LogStreamName: MirroringDestinationDelivery
+
   FirehoseVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -251,6 +398,40 @@ Resources:
       Architectures:
         - x86_64
       Timeout: 300
+      Environment:
+        Variables:
+          MIRRORING_AUDIT_STREAM_NAME: MirroringAuditStream
+    Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !GetAtt MVRAuditLogGroup.Arn
+            - Effect: Allow
+              Action:
+                - firehose:PutRecord
+                - firehose:PutRecordBatch
+              Resource: !Sub 'arn:aws:firehose:${AWS::Region}:${AWS::AccountId}:deliverystream/MirroringAuditStream'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - app.ts
+
+  MirroringProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: mirroring-processor/
+      Handler: app.lambdaHandler
+      Runtime: nodejs22.x
+      Architectures:
+        - x86_64
+      Timeout: 300
     Policies:
         - Version: "2012-10-17"
           Statement:
@@ -283,6 +464,14 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: firehose.amazonaws.com
       SourceArn: !GetAtt IndividualAuditFirehoseStream.Arn
+
+  MirroringProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MirroringProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: firehose.amazonaws.com
+      SourceArn: !GetAtt MirroringAuditFirehoseStream.Arn
 
   ApiGatewayAccount:
     Type: AWS::ApiGateway::Account
@@ -479,3 +668,15 @@ Outputs:
   MVRAuditFirehose:
     Description: Kinesis Data Firehose stream for MVR audit logs
     Value: !GetAtt CompanyAuditFirehoseStream.Arn
+
+  WAFWebACLArn:
+    Description: ARN of the WAF Web ACL protecting the API Gateway
+    Value: !GetAtt WAFWebACL.Arn
+
+  WAFWebACLId:
+    Description: ID of the WAF Web ACL
+    Value: !GetAtt WAFWebACL.Id
+
+  WAFLogGroup:
+    Description: CloudWatch Log Group for WAF logs
+    Value: !Ref WAFLogGroup
